@@ -7,28 +7,30 @@ package sqlcgen
 
 import (
 	"context"
-	"database/sql"
 )
 
 const getAllItems = `-- name: GetAllItems :many
-SELECT item_id, institution_name FROM items WHERE status = 'active' ORDER BY created_at DESC
+SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at FROM items WHERE status = 'active' ORDER BY created_at DESC
 `
 
-type GetAllItemsRow struct {
-	ItemID          string         `json:"item_id"`
-	InstitutionName sql.NullString `json:"institution_name"`
-}
-
-func (q *Queries) GetAllItems(ctx context.Context) ([]GetAllItemsRow, error) {
+func (q *Queries) GetAllItems(ctx context.Context) ([]Item, error) {
 	rows, err := q.db.QueryContext(ctx, getAllItems)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []GetAllItemsRow{}
+	items := []Item{}
 	for rows.Next() {
-		var i GetAllItemsRow
-		if err := rows.Scan(&i.ItemID, &i.InstitutionName); err != nil {
+		var i Item
+		if err := rows.Scan(
+			&i.ItemID,
+			&i.AccessToken,
+			&i.InstitutionName,
+			&i.Status,
+			&i.Cursor,
+			&i.CreatedAt,
+			&i.LastSyncedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
