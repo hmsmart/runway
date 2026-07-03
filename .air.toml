@@ -1,0 +1,8 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+args_bin = []
+entrypoint = "tmp/runway"
+cmd = "go build -o tmp/runway ./cmd"
+include_ext = ["go", "html", "css"]

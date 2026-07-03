@@ -1,0 +1,39 @@
+version: '3'
+
+tasks:
+  setup:
+    desc: Install/update pinned dev tools from go.mod
+    cmds:
+      - go get -tool github.com/air-verse/air
+      - go get -tool github.com/sqlc-dev/sqlc/cmd/sqlc
+      - go mod tidy
+
+  sqlc:
+    cmds:
+      - go tool sqlc generate
+    sources:
+      - database/queries/*.sql
+      - sqlc.yaml
+    generates:
+      - database/sqlcgen/*.go
+
+  go:build:
+    desc: Build for production
+    deps: [sqlc]
+    cmds:
+      - mkdir -p ./release
+      - go build -o ./release/runway ./cmd/main.go
+      - echo "Release built in ./release/"
+
+  clean:
+    desc: Clean build artifacts (including database)
+    cmds:
+      - rm -rf ./tmp
+      - rm -rf ./release
+      - rm -rf ./data
+
+  default:
+    desc: Run and watch with air
+    deps: [sqlc]
+    cmds:
+      - go tool air

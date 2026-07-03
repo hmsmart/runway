@@ -3,7 +3,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS "items" (
 	"item_id"	TEXT NOT NULL UNIQUE,
-	"access_token"	BLOB NOT NULL,
+	"access_token"	TEXT NOT NULL,
 	"institution_name"	TEXT,
 	"status"	TEXT NOT NULL DEFAULT 'active',
 	"cursor"	TEXT,
