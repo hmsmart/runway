@@ -22,7 +22,7 @@ tasks:
     deps: [sqlc]
     cmds:
       - mkdir -p ./release
-      - go build -o ./release/runway ./cmd/main.go
+      - go build -o ./release/runway .
       - echo "Release built in ./release/"
 
   clean:
