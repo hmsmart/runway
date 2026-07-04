@@ -5,4 +5,4 @@ tmp_dir = "tmp"
 args_bin = []
 entrypoint = "tmp/runway"
 cmd = "go build -o tmp/runway ./cmd"
-include_ext = ["go", "html", "css"]
+include_ext = ["go", "html", "css", "sql"]

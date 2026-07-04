@@ -22,6 +22,7 @@ type Account struct {
 	RawJson          sql.NullString  `json:"raw_json"`
 	CreatedAt        time.Time       `json:"created_at"`
 	LastSyncedAt     sql.NullTime    `json:"last_synced_at"`
+	Tracked          int64           `json:"tracked"`
 }
 
 type DailySpend struct {

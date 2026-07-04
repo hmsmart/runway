@@ -1,4 +1,4 @@
-package runway
+package main
 
 import (
 	"encoding/hex"
