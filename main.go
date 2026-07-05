@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/hmsmart/runway/database"
-	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -34,14 +33,13 @@ func main() {
 func run(ctx context.Context) error {
 	cfg := LoadSettings()
 
-	// Initialize database connection
-	dbConn, err := database.NewDatabase(ctx, cfg.DBPath)
+	store, err := database.GetStore(ctx, cfg.DBPath)
 	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
+		return fmt.Errorf("failed to open databse: %w", err)
 	}
+
 	slog.Info("connected to database", "path", cfg.DBPath)
-	defer func() { _ = dbConn.Close() }()
-	db := sqlcgen.New(dbConn)
+	defer func() { _ = store.Close() }()
 
 	//Connect to Telegram
 
@@ -49,7 +47,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
-	tg.RegisterHandlers(db)
+	tg.RegisterHandlers(store)
 	go tg.bot.Start(ctx)
 	slog.Info("telegram setup")
 
@@ -64,9 +62,9 @@ func run(ctx context.Context) error {
 
 	//Start HTTP Server
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", handleHealthz(dbConn))
-	mux.Handle("GET /link", handleLink(plaidClient, ctx, *cfg))
-	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, ctx, *cfg, db))
+	mux.Handle("GET /healthz", handleHealthz(store))
+	mux.Handle("GET /link", handleLink(plaidClient, cfg))
+	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg))
 
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: mux}
 

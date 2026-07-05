@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/database"
 )
 
 type TelegramBot struct {
@@ -38,7 +38,7 @@ func (t *TelegramBot) userFilter(next bot.HandlerFunc) bot.HandlerFunc {
 	}
 }
 
-func (t *TelegramBot) RegisterHandlers(db *sqlcgen.Queries) {
+func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/ping", bot.MatchTypeExact,
 		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			slog.Info("got ping", "chatID", update.Message.Chat.ID)
