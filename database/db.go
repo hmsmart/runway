@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
@@ -15,14 +16,20 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-func NewDatabase(ctx context.Context, dbPath string) (*sql.DB,
+type Store struct {
+	*sqlcgen.Queries
+	db *sql.DB
+}
+
+func newDatabase(ctx context.Context, dbPath string) (*sql.DB,
 	error) {
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -30,20 +37,50 @@ func NewDatabase(ctx context.Context, dbPath string) (*sql.DB,
 	db.SetMaxOpenConns(1) // SQLite has one writer at a time
 	db.SetMaxIdleConns(1)
 
-	// Write-Ahead Log, writers don't block readers and visa versa
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
-		return nil, fmt.Errorf("enable WAL mode: %w", err)
-	}
-
-	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	//Check DB alive
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
 	if err := runMigrations(db); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 
 	return db, nil
+}
+
+func GetStore(ctx context.Context, dbPath string) (*Store, error) {
+	db, err := newDatabase(ctx, dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database connection: %w", err)
+	}
+	return &Store{
+		Queries: sqlcgen.New(db),
+		db:      db,
+	}, nil
+}
+
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+func (s *Store) ExecTx(ctx context.Context, fn func(*sqlcgen.Queries) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	q := sqlcgen.New(tx)
+	if err := fn(q); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func runMigrations(db *sql.DB) error {
