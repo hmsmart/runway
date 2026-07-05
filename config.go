@@ -17,6 +17,9 @@ type Config struct {
 	DBPath            string            `envconfig:"DB_PATH" default:"./data/runway.db"`
 	DBCryptKey        []byte            `envconfig:"-"`
 	DBCryptKeyHex     string            `envconfig:"DB_CRYPT_KEY"`
+	ListenAddress     string            `envconfig:"LISTEN_ADDRESS" default:"localhost:1996"`
+	TGBotKey          string            `envconfig:"TG_BOT_KEY"`
+	TGChatId          int64             `envconfig:"TG_CHAT_ID"`
 	Production        bool              `envconfig:"PRODUCTION" default:"false"`
 	PlaidClientID     string            `envconfig:"PLAID_CLIENT_ID"`
 	PlaidSecret       string            `envconfig:"PLAID_SECRET"`

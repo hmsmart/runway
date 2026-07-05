@@ -7,6 +7,14 @@ tasks:
       - go get -tool github.com/air-verse/air
       - go get -tool github.com/sqlc-dev/sqlc/cmd/sqlc
       - go mod tidy
+  
+  templ:
+    cmds: 
+      - go tool templ generate
+    sources: 
+      - templates/*.templ
+    generates:
+      - templates/*.go
 
   sqlc:
     cmds:
@@ -34,6 +42,6 @@ tasks:
 
   default:
     desc: Run and watch with air
-    deps: [sqlc]
+    deps: [sqlc, templ]
     cmds:
       - go tool air

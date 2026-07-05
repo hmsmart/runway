@@ -1,0 +1,33 @@
+package templates
+
+templ LinkPage(linkToken string) {
+	<!DOCTYPE html>
+	<html>
+		<body>
+			<button id="link-btn" data-token={ linkToken }>Link Account</button>
+			<p id="status"></p>
+			<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+			<script>
+				const btn = document.getElementById('link-btn');
+				const handler = Plaid.create({
+					token: btn.dataset.token,
+					onSuccess: async (publicToken, metadata) => {
+						document.getElementById('status').textContent = 'Exchanging...';
+						const res = await fetch('/exchange-token', {
+							method: 'POST',
+							headers: {'Content-Type': 'application/json'},
+							body: JSON.stringify({public_token: publicToken})
+						});
+						document.getElementById('status').textContent = res.ok
+							? 'Linked: ' + metadata.institution.name
+							: 'Failed';
+					},
+					onExit: (err) => {
+						if (err) document.getElementById('status').textContent = err.display_message;
+					}
+				});
+				btn.addEventListener('click', () => handler.open());
+			</script>
+		</body>
+	</html>
+}

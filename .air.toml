@@ -2,6 +2,6 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-cmd = "task sqlc && go build -o tmp/runway ."
+cmd = "task sqlc && task templ && go build -o tmp/runway ."
 bin = "tmp/runway"
-include_ext = ["go", "html", "css", "sql"]
+include_ext = ["go", "html", "css", "sql", "templ"]

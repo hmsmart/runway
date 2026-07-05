@@ -7,7 +7,39 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
+
+const createItem = `-- name: CreateItem :exec
+INSERT INTO items (
+    item_id,
+    access_token,
+    institution_name,
+    status
+) VALUES (
+    ?,
+    ?,
+    ?,
+    ?
+)
+`
+
+type CreateItemParams struct {
+	ItemID          string         `json:"item_id"`
+	AccessToken     string         `json:"access_token"`
+	InstitutionName sql.NullString `json:"institution_name"`
+	Status          string         `json:"status"`
+}
+
+func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) error {
+	_, err := q.db.ExecContext(ctx, createItem,
+		arg.ItemID,
+		arg.AccessToken,
+		arg.InstitutionName,
+		arg.Status,
+	)
+	return err
+}
 
 const getAllItems = `-- name: GetAllItems :many
 SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at FROM items WHERE status = 'active' ORDER BY created_at DESC
