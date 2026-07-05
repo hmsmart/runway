@@ -19,11 +19,11 @@ templ LinkPage(linkToken string) {
 							body: JSON.stringify({public_token: publicToken})
 						});
 						document.getElementById('status').textContent = res.ok
-							? 'Linked: ' + metadata.institution.name
+							? 'Linked: ' + (metadata.institution?.name ?? 'account')
 							: 'Failed';
 					},
 					onExit: (err) => {
-						if (err) document.getElementById('status').textContent = err.display_message;
+						if (err) document.getElementById('status').textContent = err.display_message || 'Link exited with an error';
 					}
 				});
 				btn.addEventListener('click', () => handler.open());

@@ -33,8 +33,8 @@ func clientIP(r *http.Request) string {
 func handleHealthz(dbConn *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := dbConn.PingContext(r.Context()); err != nil {
-
 			http.Error(w, "db unreachable", http.StatusServiceUnavailable)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
@@ -42,47 +42,45 @@ func handleHealthz(dbConn *sql.DB) http.HandlerFunc {
 }
 func handleTokenExchange(plaidClient *plaid.APIClient, ctx context.Context, cfg Config, db *sqlcgen.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("unwrapping pubtoken exchange request", "for", clientIP(r))
+		ip := clientIP(r)
+		slog.Info("unwrapping pubtoken exchange request", "for", ip)
 		var body struct {
 			PublicToken string `json:"public_token"`
-			Accounts    []struct {
-				ID      string `json:"id"`
-				Name    string `json:"name"`
-				Mask    string `json:"mask"`
-				Type    string `json:"type"`
-				Subtype string `json:"subtype"`
-			} `json:"accounts"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			slog.Error("parsing body request", "for", clientIP(r), "err", err)
+			slog.Error("parsing body request", "for", ip, "err", err)
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
-		slog.Info("begin pub token exchange", "for", clientIP(r), "pubtoken", body.PublicToken)
+		slog.Info("begin pub token exchange", "for", ip)
 		exchangeRequest := plaid.NewItemPublicTokenExchangeRequest(body.PublicToken)
 		callCtx, cancel := context.WithTimeout(ctx, cfg.PlaidTimeout)
 		defer cancel()
 		exchangeResponse, _, err := plaidClient.PlaidApi.ItemPublicTokenExchange(callCtx).ItemPublicTokenExchangeRequest(*exchangeRequest).Execute()
 		if err != nil {
-			slog.Error("unable to generate access token", "for", clientIP(r), "err", err)
+			slog.Error("unable to generate access token", "for", ip, "err", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
 		}
 		accessToken := exchangeResponse.GetAccessToken()
-		slog.Info("successfully linked account", "for", clientIP(r), "tok", accessToken)
-		slog.Info("fetch associated accounts", "for", clientIP(r))
-		callCtx, cancel = context.WithTimeout(ctx, cfg.PlaidTimeout)
-		defer cancel()
+		slog.Info("successfully linked account", "for", ip)
+		slog.Info("fetch associated accounts", "for", ip)
+		itemCtx, itemCancel := context.WithTimeout(ctx, cfg.PlaidTimeout)
+		defer itemCancel()
 		itemRequest := plaid.NewItemGetRequest(accessToken)
-		itemResp, _, err := plaidClient.PlaidApi.ItemGet(ctx).ItemGetRequest(*itemRequest).Execute()
+		itemResp, _, err := plaidClient.PlaidApi.ItemGet(itemCtx).ItemGetRequest(*itemRequest).Execute()
 		if err != nil {
-			slog.Error("unable to retrieve item", "for", clientIP(r), "err", err)
+			slog.Error("unable to retrieve item", "for", ip, "err", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
 		}
 		item := itemResp.GetItem()
-		slog.Info("retrieved item data", "for", clientIP(r))
+		slog.Info("retrieved item data", "for", ip)
 		atenc, err := EncryptColumnSecret(accessToken, item.ItemId, cfg.DBCryptKey)
 		if err != nil {
-			slog.Error("unable to encrypt access token", "for", clientIP(r), "err", err)
+			slog.Error("unable to encrypt access token", "for", ip, "err", err)
 			http.Error(w, "database err", 500)
+			return
 		}
 		err = db.CreateItem(ctx, sqlcgen.CreateItemParams{
 			ItemID:          item.ItemId,
@@ -91,19 +89,21 @@ func handleTokenExchange(plaidClient *plaid.APIClient, ctx context.Context, cfg 
 			Status:          "active",
 		})
 		if err != nil {
-			slog.Error("unable to insert record", "for", clientIP(r), "err", err)
+			slog.Error("unable to insert record", "for", ip, "err", err)
 			http.Error(w, "database err", 500)
+			return
 		}
-		slog.Info("successfully added new item to database", "for", clientIP(r))
+		slog.Info("successfully added new item to database", "for", ip)
 		w.WriteHeader(200)
 		w.Write([]byte("linked"))
 	}
 }
 func handleLink(plaidClient *plaid.APIClient, ctx context.Context, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("begin link request", "for", clientIP(r))
+		ip := clientIP(r)
+		slog.Info("begin link request", "for", ip)
 		user := plaid.LinkTokenCreateRequestUser{
-			ClientUserId: "hayden",
+			ClientUserId: cfg.PlaidClientUserID,
 		}
 		depository := plaid.DepositoryFilter{
 			AccountSubtypes: []plaid.DepositoryAccountSubtype{
@@ -123,26 +123,23 @@ func handleLink(plaidClient *plaid.APIClient, ctx context.Context, cfg Config) h
 			[]plaid.CountryCode{plaid.COUNTRYCODE_US},
 		)
 		plaidRequest.SetProducts([]plaid.Products{plaid.PRODUCTS_TRANSACTIONS})
-		plaidRequest.SetWebhook("https://gpws.kawaiide.su/hook/plaid")
+		plaidRequest.SetWebhook(cfg.PlaidWebhookURL)
 		plaidRequest.SetAccountFilters(accountFilters)
 		plaidRequest.SetUser(user)
 		callCtx, cancel := context.WithTimeout(ctx, cfg.PlaidTimeout)
 		defer cancel()
 		linkTokenCreateResp, httpResp, err := plaidClient.PlaidApi.LinkTokenCreate(callCtx).LinkTokenCreateRequest(*plaidRequest).Execute()
 		if err != nil {
-			slog.Error("unable to generate link token", "for", clientIP(r), "err", err)
-			body, _ := io.ReadAll(httpResp.Body)
-			fmt.Printf("%v", string(body))
+			var respBody string
+			if httpResp != nil {
+				b, _ := io.ReadAll(httpResp.Body)
+				respBody = string(b)
+			}
+			slog.Error("unable to generate link token", "for", ip, "err", err, "resp", respBody)
 			http.Error(w, fmt.Sprintf("plaid link token create: %v", err), http.StatusBadGateway)
 			return
 		}
 		plaidLinkToken := linkTokenCreateResp.GetLinkToken()
 		templates.LinkPage(plaidLinkToken).Render(r.Context(), w)
-	}
-}
-
-func amortizeTxn(dbConn *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-
 	}
 }

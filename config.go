@@ -30,6 +30,8 @@ type Config struct {
 	PlaidProducts     string            `envconfig:"PLAID_PRODUCTS" default:"auth,transactions,signal"`
 	PlaidCountryCodes string            `envconfig:"PLAID_COUNTRY_CODES" default:"US,CA"`
 	PlaidRedirectURI  string            `envconfig:"PLAID_REDIRECT_URI"`
+	PlaidWebhookURL   string            `envconfig:"PLAID_WEBHOOK_URL" default:"https://gpws.kawaiide.su/hook/plaid"`
+	PlaidClientUserID string            `envconfig:"PLAID_CLIENT_USER_ID" default:"hayden"`
 }
 
 var Env Config

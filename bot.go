@@ -17,7 +17,7 @@ type TelegramBot struct {
 
 func NewTelegramBot(token string, chatID int64) (*TelegramBot, error) {
 	b, err := bot.New(token)
-	if (err) != nil {
+	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
 	return &TelegramBot{bot: b, chatID: chatID}, nil
@@ -28,7 +28,7 @@ func (t *TelegramBot) userFilter(next bot.HandlerFunc) bot.HandlerFunc {
 		chatID := int64(0)
 		if update.Message != nil {
 			chatID = update.Message.Chat.ID
-		} else if update.CallbackQuery != nil {
+		} else if update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
 			chatID = update.CallbackQuery.Message.Message.Chat.ID
 		}
 		if chatID != t.chatID {
