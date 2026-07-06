@@ -76,6 +76,23 @@ func run(ctx context.Context) error {
 	}()
 	slog.Info("runway is up", "addr", cfg.ListenAddress)
 
+	slog.Info("program init synchronizing transactions")
+	go func() {
+		items, err := store.GetAllItems(ctx)
+		if err != nil {
+			slog.Error("failed to load items during startup synchronization", "err", err)
+			return
+		}
+		for _, item := range items {
+			accesstoken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
+			if err != nil {
+				slog.Error("failed decrypt access token for", "item", item.ItemID, "err", err)
+			}
+			cursor := NullStringToPtr(item.Cursor)
+			syncTranscations(ctx, item.ItemID, accesstoken, cursor, plaidClient, store, cfg)
+		}
+	}()
+
 	select {
 	case err := <-srvErr:
 		return fmt.Errorf("http server: %w", err)

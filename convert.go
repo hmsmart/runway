@@ -35,3 +35,10 @@ func ToNullTime(t *time.Time, ok bool) sql.NullTime {
 	fmt.Printf("At Time: %v", *t)
 	return sql.NullTime{Time: *t, Valid: ok}
 }
+
+func NullStringToPtr(ns sql.NullString) *string {
+	if !ns.Valid {
+		return nil
+	}
+	return &ns.String
+}
