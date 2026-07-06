@@ -14,3 +14,5 @@ INSERT INTO items (
     ?,
     ?
 );
+-- name: UpdateItemCursor :exec
+UPDATE items SET cursor = ?, last_synced_at = ? WHERE item_id = ?;

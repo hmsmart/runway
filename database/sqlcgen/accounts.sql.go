@@ -93,7 +93,6 @@ ON CONFLICT(account_id) DO UPDATE SET
   balance_available = excluded.balance_available,
   balance_current = excluded.balance_current,
   iso_currency_code = excluded.iso_currency_code,
-  tracked = excluded.tracked,
   last_synced_at = excluded.last_synced_at,
   raw_json = excluded.raw_json
 WHERE excluded.last_synced_at > accounts.last_synced_at OR accounts.last_synced_at IS NULL

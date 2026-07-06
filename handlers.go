@@ -88,17 +88,10 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			return
 		}
 		slog.Info("successfully added new item to database", "for", ip)
-		// fire and forget the heavy stuff
+		// fire and forget the heavy stuff; persistCtx outlives the request
 		go func() {
-			// new context — the request context dies after the 200
-			ctx := context.Background()
-			if err := syncAllAccounts(ctx, item.ItemId, plaidClient, store, cfg); err != nil {
-				slog.Error("post-link account sync failed", "item", item.ItemId, "err", err)
-				return
-			}
-			if err := syncTranscations(ctx, item.ItemId, accessToken, nil, plaidClient, store, cfg); err != nil {
-				slog.Error("post-link transaction sync failed", "item", item.ItemId, "err", err)
-				return
+			if err := syncItem(persistCtx, item.ItemId, accessToken, nil, plaidClient, store, cfg); err != nil {
+				slog.Error("post-link sync failed", "item", item.ItemId, "err", err)
 			}
 		}()
 		w.WriteHeader(http.StatusOK)

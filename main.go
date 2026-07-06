@@ -84,12 +84,14 @@ func run(ctx context.Context) error {
 			return
 		}
 		for _, item := range items {
-			accesstoken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
+			accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
 			if err != nil {
-				slog.Error("failed decrypt access token for", "item", item.ItemID, "err", err)
+				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)
+				continue
 			}
-			cursor := NullStringToPtr(item.Cursor)
-			syncTranscations(ctx, item.ItemID, accesstoken, cursor, plaidClient, store, cfg)
+			if err := syncItem(ctx, item.ItemID, accessToken, NullStringToPtr(item.Cursor), plaidClient, store, cfg); err != nil {
+				slog.Error("startup sync failed", "item", item.ItemID, "err", err)
+			}
 		}
 	}()
 

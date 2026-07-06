@@ -94,3 +94,18 @@ func (q *Queries) GetItemByID(ctx context.Context, itemID string) (Item, error) 
 	)
 	return i, err
 }
+
+const updateItemCursor = `-- name: UpdateItemCursor :exec
+UPDATE items SET cursor = ?, last_synced_at = ? WHERE item_id = ?
+`
+
+type UpdateItemCursorParams struct {
+	Cursor       sql.NullString `json:"cursor"`
+	LastSyncedAt sql.NullTime   `json:"last_synced_at"`
+	ItemID       string         `json:"item_id"`
+}
+
+func (q *Queries) UpdateItemCursor(ctx context.Context, arg UpdateItemCursorParams) error {
+	_, err := q.db.ExecContext(ctx, updateItemCursor, arg.Cursor, arg.LastSyncedAt, arg.ItemID)
+	return err
+}
