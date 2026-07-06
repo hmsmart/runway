@@ -10,33 +10,73 @@ import (
 	"database/sql"
 )
 
-const deleteTransaction = `-- name: DeleteTransaction :exec
-DELETE FROM transactions WHERE transaction_id = ?
+const promotePending = `-- name: PromotePending :exec
+UPDATE transactions
+SET plaid_tx_id = ?,
+    date = ?,
+    amount = ?,
+    name = ?,
+    merchant_name = ?,
+    pending = 0,
+    raw_json = ?
+WHERE plaid_tx_id = ? AND pending = 1
 `
 
-func (q *Queries) DeleteTransaction(ctx context.Context, transactionID string) error {
-	_, err := q.db.ExecContext(ctx, deleteTransaction, transactionID)
+type PromotePendingParams struct {
+	PlaidTxID    string         `json:"plaid_tx_id"`
+	Date         string         `json:"date"`
+	Amount       float64        `json:"amount"`
+	Name         sql.NullString `json:"name"`
+	MerchantName sql.NullString `json:"merchant_name"`
+	RawJson      sql.NullString `json:"raw_json"`
+	PlaidTxID_2  string         `json:"plaid_tx_id_2"`
+}
+
+func (q *Queries) PromotePending(ctx context.Context, arg PromotePendingParams) error {
+	_, err := q.db.ExecContext(ctx, promotePending,
+		arg.PlaidTxID,
+		arg.Date,
+		arg.Amount,
+		arg.Name,
+		arg.MerchantName,
+		arg.RawJson,
+		arg.PlaidTxID_2,
+	)
+	return err
+}
+
+const softDeleteTransaction = `-- name: SoftDeleteTransaction :exec
+UPDATE transactions SET removed_at = datetime('now')
+WHERE plaid_tx_id = ?
+`
+
+func (q *Queries) SoftDeleteTransaction(ctx context.Context, plaidTxID string) error {
+	_, err := q.db.ExecContext(ctx, softDeleteTransaction, plaidTxID)
 	return err
 }
 
 const upsertTransaction = `-- name: UpsertTransaction :exec
-INSERT INTO transactions (transaction_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, payment_channel, pending, raw_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(transaction_id) DO UPDATE SET
-  account_id = excluded.account_id,
-  date = excluded.date,
-  amount = excluded.amount,
-  name = excluded.name,
-  merchant_name = excluded.merchant_name,
-  category_primary = excluded.category_primary,
-  category_detailed = excluded.category_detailed,
-  payment_channel = excluded.payment_channel,
-  pending = excluded.pending,
-  raw_json = excluded.raw_json
+INSERT INTO transactions (
+    tx_id, plaid_tx_id, account_id, date, amount,
+    name, merchant_name, category_primary, category_detailed,
+    payment_channel, pending, raw_json
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(plaid_tx_id) DO UPDATE SET
+    date = excluded.date,
+    amount = excluded.amount,
+    name = excluded.name,
+    merchant_name = excluded.merchant_name,
+    category_primary = excluded.category_primary,
+    category_detailed = excluded.category_detailed,
+    payment_channel = excluded.payment_channel,
+    pending = excluded.pending,
+    raw_json = excluded.raw_json
 `
 
 type UpsertTransactionParams struct {
-	TransactionID    string         `json:"transaction_id"`
+	TxID             string         `json:"tx_id"`
+	PlaidTxID        string         `json:"plaid_tx_id"`
 	AccountID        string         `json:"account_id"`
 	Date             string         `json:"date"`
 	Amount           float64        `json:"amount"`
@@ -51,7 +91,8 @@ type UpsertTransactionParams struct {
 
 func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, upsertTransaction,
-		arg.TransactionID,
+		arg.TxID,
+		arg.PlaidTxID,
 		arg.AccountID,
 		arg.Date,
 		arg.Amount,

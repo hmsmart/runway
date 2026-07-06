@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/plaid/plaid-go/v43/plaid"
@@ -87,7 +88,7 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 			}
 		}
 		for _, tx := range resp.GetRemoved() {
-			if err := q.DeleteTransaction(ctx, tx.GetTransactionId()); err != nil {
+			if err := q.SoftDeleteTransaction(ctx, tx.GetTransactionId()); err != nil {
 				return fmt.Errorf("delete transaction %s: %w", tx.GetTransactionId(), err)
 			}
 		}
@@ -109,8 +110,13 @@ func transactionParams(tx plaid.Transaction, cfg *Config) sqlcgen.UpsertTransact
 		catPrimary = ToNullString(&pfc.Primary, true)
 		catDetailed = ToNullString(&pfc.Detailed, true)
 	}
+	txid, err := uuid.NewV7()
+	if err != nil {
+		panic("uuid " + err.Error())
+	}
 	return sqlcgen.UpsertTransactionParams{
-		TransactionID:    tx.GetTransactionId(),
+		TxID:             txid.String(),
+		PlaidTxID:        tx.GetTransactionId(),
 		AccountID:        tx.GetAccountId(),
 		Date:             tx.GetDate(),
 		Amount:           tx.GetAmount(),

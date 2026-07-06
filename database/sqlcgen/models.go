@@ -19,10 +19,10 @@ type Account struct {
 	IsoCurrencyCode  sql.NullString  `json:"iso_currency_code"`
 	Type             sql.NullString  `json:"type"`
 	Subtype          sql.NullString  `json:"subtype"`
+	Tracked          int64           `json:"tracked"`
 	RawJson          sql.NullString  `json:"raw_json"`
 	CreatedAt        time.Time       `json:"created_at"`
 	LastSyncedAt     sql.NullTime    `json:"last_synced_at"`
-	Tracked          int64           `json:"tracked"`
 }
 
 type DailySpend struct {
@@ -44,8 +44,17 @@ type Item struct {
 	LastSyncedAt    sql.NullTime   `json:"last_synced_at"`
 }
 
+type TelegramCallback struct {
+	CbToken   string        `json:"cb_token"`
+	TxID      string        `json:"tx_id"`
+	Action    string        `json:"action"`
+	MsgID     sql.NullInt64 `json:"msg_id"`
+	CreatedAt int64         `json:"created_at"`
+}
+
 type Transaction struct {
-	TransactionID    string         `json:"transaction_id"`
+	TxID             string         `json:"tx_id"`
+	PlaidTxID        string         `json:"plaid_tx_id"`
 	AccountID        string         `json:"account_id"`
 	Date             string         `json:"date"`
 	Amount           float64        `json:"amount"`
@@ -55,5 +64,8 @@ type Transaction struct {
 	CategoryDetailed sql.NullString `json:"category_detailed"`
 	PaymentChannel   sql.NullString `json:"payment_channel"`
 	Pending          int64          `json:"pending"`
+	RemovedAt        sql.NullString `json:"removed_at"`
+	AmortEnd         sql.NullString `json:"amort_end"`
+	Excluded         int64          `json:"excluded"`
 	RawJson          sql.NullString `json:"raw_json"`
 }
