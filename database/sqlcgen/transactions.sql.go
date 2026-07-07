@@ -19,6 +19,33 @@ func (q *Queries) ExcludeTransaction(ctx context.Context, txID string) error {
 	return err
 }
 
+const getTransaction = `-- name: GetTransaction :one
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, payment_channel, pending, removed_at, amort_end, excluded, raw_json FROM transactions WHERE tx_id = ?
+`
+
+func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
+	row := q.db.QueryRowContext(ctx, getTransaction, txID)
+	var i Transaction
+	err := row.Scan(
+		&i.TxID,
+		&i.PlaidTxID,
+		&i.AccountID,
+		&i.Date,
+		&i.Amount,
+		&i.Name,
+		&i.MerchantName,
+		&i.CategoryPrimary,
+		&i.CategoryDetailed,
+		&i.PaymentChannel,
+		&i.Pending,
+		&i.RemovedAt,
+		&i.AmortEnd,
+		&i.Excluded,
+		&i.RawJson,
+	)
+	return i, err
+}
+
 const setAmortEnd = `-- name: SetAmortEnd :exec
 UPDATE transactions SET amort_end = date("date", CAST(?1 AS TEXT)) WHERE tx_id = ?2
 `

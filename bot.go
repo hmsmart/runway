@@ -93,6 +93,7 @@ func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 				t.answerCallback(ctx, b, update, "Something went wrong")
 				return
 			}
+			t.refreshMessage(ctx, b, update, store, txID)
 			t.answerCallback(ctx, b, update, "Excluded from spend")
 		}),
 	)
@@ -118,7 +119,7 @@ func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 				t.answerCallback(ctx, b, update, "Something went wrong")
 				return
 			}
-			t.swapKeyboard(ctx, b, update, transactionKeyboard(txID))
+			t.refreshMessage(ctx, b, update, store, txID)
 			t.answerCallback(ctx, b, update, "Amortizing over "+period.label)
 		}),
 	)
@@ -138,6 +139,30 @@ func (t *TelegramBot) swapKeyboard(ctx context.Context, b *bot.Bot, update *mode
 	})
 	if err != nil {
 		slog.Error("failed to edit message keyboard", "err", err)
+	}
+}
+
+// refreshMessage rewrites a notification's body from the row's current state
+// (amortized/excluded status lines) and resets the keyboard to the main row.
+func (t *TelegramBot) refreshMessage(ctx context.Context, b *bot.Bot, update *models.Update, store *database.Store, txID string) {
+	msg := update.CallbackQuery.Message.Message
+	if msg == nil {
+		return
+	}
+	tx, err := store.GetTransaction(ctx, txID)
+	if err != nil {
+		slog.Error("failed to load transaction for message refresh", "tx", txID, "err", err)
+		return
+	}
+	_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:      msg.Chat.ID,
+		MessageID:   msg.ID,
+		Text:        formatTransactionMessage(tx),
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: transactionKeyboard(txID),
+	})
+	if err != nil {
+		slog.Error("failed to refresh transaction message", "tx", txID, "err", err)
 	}
 }
 
@@ -161,7 +186,7 @@ func (t *TelegramBot) NotifyTransaction(ctx context.Context, tx sqlcgen.UpsertTr
 	}
 	_, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      t.chatID,
-		Text:        formatTransactionMessage(tx),
+		Text:        formatTransactionMessage(transactionFromParams(tx)),
 		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: transactionKeyboard(tx.TxID),
 	})
@@ -197,7 +222,27 @@ func amortizeKeyboard(txID string) models.InlineKeyboardMarkup {
 	}
 }
 
-func formatTransactionMessage(tx sqlcgen.UpsertTransactionParams) string {
+// transactionFromParams adapts freshly upserted params to the row model so
+// notifications and post-action refreshes share one message formatter. New
+// rows have no amortization/exclusion state yet, so those default to unset.
+func transactionFromParams(p sqlcgen.UpsertTransactionParams) sqlcgen.Transaction {
+	return sqlcgen.Transaction{
+		TxID:             p.TxID,
+		PlaidTxID:        p.PlaidTxID,
+		AccountID:        p.AccountID,
+		Date:             p.Date,
+		Amount:           p.Amount,
+		Name:             p.Name,
+		MerchantName:     p.MerchantName,
+		CategoryPrimary:  p.CategoryPrimary,
+		CategoryDetailed: p.CategoryDetailed,
+		PaymentChannel:   p.PaymentChannel,
+		Pending:          p.Pending,
+		RawJson:          p.RawJson,
+	}
+}
+
+func formatTransactionMessage(tx sqlcgen.Transaction) string {
 	var b strings.Builder
 
 	// Header — merchant or name, fallback to "Unknown"
@@ -232,6 +277,14 @@ func formatTransactionMessage(tx sqlcgen.UpsertTransactionParams) string {
 
 	if tx.Pending == 1 {
 		b.WriteString("\n⏳ <i>pending</i>")
+	}
+
+	if tx.AmortEnd.Valid {
+		b.WriteString(fmt.Sprintf("\n📊 <i>amortized until %s</i>", html.EscapeString(tx.AmortEnd.String)))
+	}
+
+	if tx.Excluded == 1 {
+		b.WriteString("\n🚫 <i>excluded from spend</i>")
 	}
 
 	return b.String()

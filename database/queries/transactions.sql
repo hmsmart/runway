@@ -18,6 +18,9 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     raw_json = excluded.raw_json
 RETURNING tx_id;
 
+-- name: GetTransaction :one
+SELECT * FROM transactions WHERE tx_id = ?;
+
 -- name: SoftDeleteTransaction :exec
 UPDATE transactions SET removed_at = datetime('now')
 WHERE plaid_tx_id = ?;
