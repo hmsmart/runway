@@ -6,6 +6,8 @@ import (
 	"html"
 	"log/slog"
 	"math"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -58,6 +60,7 @@ func (t *TelegramBot) RegisterHandlers(ctx context.Context, store *database.Stor
 	_, err := t.bot.SetMyCommands(ctx, &bot.SetMyCommandsParams{
 		Commands: []models.BotCommand{
 			{Command: "ping", Description: "Check the bot is alive"},
+			{Command: "link", Description: "Link a new account"},
 		},
 	})
 	if err != nil {
@@ -73,6 +76,22 @@ func (t *TelegramBot) RegisterHandlers(ctx context.Context, store *database.Stor
 			})
 		}),
 	)
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
+		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			slog.Info("got link request", "chatID", update.Message.Chat.ID)
+			token := store.Tokens.GenerateToken()
+			params := url.Values{}
+			params.Set("token", token)
+			params.Set("tgid", strconv.FormatInt(update.Message.Chat.ID, 10))
+			linkURL := "https://gpws.kawaiide.su/link?" + params.Encode()
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      formatLinkMessage(linkURL),
+				ParseMode: "HTML",
+			})
+		}),
+	)
+
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "menu:", bot.MatchTypePrefix,
 		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			parts := strings.SplitN(update.CallbackQuery.Data, ":", 3)
@@ -264,6 +283,16 @@ func transactionFromParams(p sqlcgen.UpsertTransactionParams) sqlcgen.Transactio
 		Pending:          p.Pending,
 		RawJson:          p.RawJson,
 	}
+}
+
+func formatLinkMessage(url string) string {
+	return fmt.Sprintf(
+		"🔗 <b>Connect Your Bank Account</b>\n\n"+
+			"Tap the link below to securely connect your account through Plaid. "+
+			"This link is <b>single-use</b> and expires in 30 minutes.\n\n"+
+			"<a href=\"%s\">Open Plaid Link</a>",
+		url,
+	)
 }
 
 func formatTransactionMessage(tx sqlcgen.Transaction) string {

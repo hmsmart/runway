@@ -64,7 +64,7 @@ func run(ctx context.Context) error {
 	//Start HTTP Server
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealthz(store))
-	mux.Handle("GET /link", handleLink(plaidClient, cfg))
+	mux.Handle("GET /link", handleLink(plaidClient, cfg, store))
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, notify))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, notify))
 

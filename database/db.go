@@ -18,7 +18,8 @@ var migrationsFS embed.FS
 
 type Store struct {
 	*sqlcgen.Queries
-	db *sql.DB
+	db     *sql.DB
+	Tokens *tokenCache
 }
 
 func newDatabase(ctx context.Context, dbPath string) (*sql.DB,
@@ -56,9 +57,11 @@ func GetStore(ctx context.Context, dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database connection: %w", err)
 	}
+	tc := newTokenCache()
 	return &Store{
 		Queries: sqlcgen.New(db),
 		db:      db,
+		Tokens:  tc,
 	}, nil
 }
 

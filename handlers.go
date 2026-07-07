@@ -98,10 +98,20 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		w.Write([]byte("linked"))
 	}
 }
-func handleLink(plaidClient *plaid.APIClient, cfg *Config) http.HandlerFunc {
+func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		slog.Info("begin link request", "for", ip)
+		token := r.URL.Query().Get("token")
+		tgid := r.URL.Query().Get("tgid")
+		if tgid == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if !store.Tokens.ConsumeToken(token) {
+			http.Error(w, "bad token", http.StatusBadRequest)
+			return
+		}
 		user := plaid.LinkTokenCreateRequestUser{
 			ClientUserId: cfg.PlaidClientUserID,
 		}
