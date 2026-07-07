@@ -40,6 +40,11 @@ func syncItem(ctx context.Context, itemID string, accessToken string, cursor *st
 }
 
 func syncTransactions(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) error {
+	if cursor == nil {
+		// First sync for this item pulls the full history — don't announce
+		// hundreds of old transactions.
+		notify = nil
+	}
 	var added, modified, removed int
 	for hasMore := true; hasMore; {
 		resp, err := fetchTransactionsPage(ctx, accessToken, cursor, plaidClient, cfg)
@@ -76,23 +81,37 @@ func fetchTransactionsPage(ctx context.Context, accessToken string, cursor *stri
 // persistTransactionsPage writes one page of sync results and advances the
 // item's cursor in the same database transaction, so a crash mid-sync resumes
 // from the last completed page instead of re-downloading everything.
-
+// Notifications are collected during the transaction and sent only after it
+// commits, so Telegram I/O never holds the write lock and users are never
+// told about rows that rolled back.
 func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config, notify TransactionNotifier) error {
 	now := time.Now()
-	return store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
+	var toNotify []sqlcgen.UpsertTransactionParams
+	err := store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
 		for _, tx := range resp.GetAdded() {
-			params := transactionParams(tx, cfg)
-			if err := q.UpsertTransaction(ctx, params); err != nil {
+			params, err := transactionParams(tx, cfg)
+			if err != nil {
+				return err
+			}
+			storedID, err := q.UpsertTransaction(ctx, params)
+			if err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
 			}
-			notify(ctx, params)
+			// The upsert returns the row's canonical tx_id; it only matches
+			// the one we generated when this was a fresh insert, so re-synced
+			// rows don't re-notify and callbacks always carry a real tx_id.
+			if storedID == params.TxID {
+				toNotify = append(toNotify, params)
+			}
 		}
 		for _, tx := range resp.GetModified() {
-			params := transactionParams(tx, cfg)
-			if err := q.UpsertTransaction(ctx, transactionParams(tx, cfg)); err != nil {
+			params, err := transactionParams(tx, cfg)
+			if err != nil {
+				return err
+			}
+			if _, err := q.UpsertTransaction(ctx, params); err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
 			}
-			notify(ctx, params)
 		}
 		for _, tx := range resp.GetRemoved() {
 			if err := q.SoftDeleteTransaction(ctx, tx.GetTransactionId()); err != nil {
@@ -105,9 +124,18 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 			ItemID:       itemID,
 		})
 	})
+	if err != nil {
+		return err
+	}
+	if notify != nil {
+		for _, params := range toNotify {
+			notify(ctx, params)
+		}
+	}
+	return nil
 }
 
-func transactionParams(tx plaid.Transaction, cfg *Config) sqlcgen.UpsertTransactionParams {
+func transactionParams(tx plaid.Transaction, cfg *Config) (sqlcgen.UpsertTransactionParams, error) {
 	var pending int64
 	if tx.GetPending() {
 		pending = 1
@@ -119,7 +147,7 @@ func transactionParams(tx plaid.Transaction, cfg *Config) sqlcgen.UpsertTransact
 	}
 	txid, err := uuid.NewV7()
 	if err != nil {
-		panic("uuid " + err.Error())
+		return sqlcgen.UpsertTransactionParams{}, fmt.Errorf("generate tx uuid: %w", err)
 	}
 	return sqlcgen.UpsertTransactionParams{
 		TxID:             txid.String(),
@@ -134,7 +162,7 @@ func transactionParams(tx plaid.Transaction, cfg *Config) sqlcgen.UpsertTransact
 		PaymentChannel:   ToNullString(tx.GetPaymentChannelOk()),
 		Pending:          pending,
 		RawJson:          encryptedRawJSON(tx, tx.GetTransactionId(), cfg.DBCryptKey),
-	}
+	}, nil
 }
 
 func syncAllAccounts(ctx context.Context, itemID string, accessToken string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config) error {
