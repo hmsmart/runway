@@ -63,8 +63,25 @@ func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 			})
 		}),
 	)
-	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "noop", bot.MatchTypeExact,
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "menu:", bot.MatchTypePrefix,
 		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			parts := strings.SplitN(update.CallbackQuery.Data, ":", 3)
+			if len(parts) != 3 {
+				t.answerCallback(ctx, b, update, "Something went wrong")
+				return
+			}
+			menu, txID := parts[1], parts[2]
+			var kb models.InlineKeyboardMarkup
+			switch menu {
+			case "amort":
+				kb = amortizeKeyboard(txID)
+			case "main":
+				kb = transactionKeyboard(txID)
+			default:
+				t.answerCallback(ctx, b, update, "Something went wrong")
+				return
+			}
+			t.swapKeyboard(ctx, b, update, kb)
 			t.answerCallback(ctx, b, update, "")
 		}),
 	)
@@ -101,9 +118,27 @@ func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 				t.answerCallback(ctx, b, update, "Something went wrong")
 				return
 			}
+			t.swapKeyboard(ctx, b, update, transactionKeyboard(txID))
 			t.answerCallback(ctx, b, update, "Amortizing over "+period.label)
 		}),
 	)
+}
+
+// swapKeyboard replaces the inline keyboard on the message a callback came
+// from, e.g. expanding Amortize into its period options.
+func (t *TelegramBot) swapKeyboard(ctx context.Context, b *bot.Bot, update *models.Update, kb models.InlineKeyboardMarkup) {
+	msg := update.CallbackQuery.Message.Message
+	if msg == nil {
+		return
+	}
+	_, err := b.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
+		ChatID:      msg.Chat.ID,
+		MessageID:   msg.ID,
+		ReplyMarkup: kb,
+	})
+	if err != nil {
+		slog.Error("failed to edit message keyboard", "err", err)
+	}
 }
 
 func (t *TelegramBot) answerCallback(ctx context.Context, b *bot.Bot, update *models.Update, text string) {
@@ -139,15 +174,24 @@ func transactionKeyboard(txID string) models.InlineKeyboardMarkup {
 	return models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
-				{Text: "📊 Amortize", CallbackData: "noop"},
+				{Text: "📊 Amortize", CallbackData: "menu:amort:" + txID},
+				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
 			},
+		},
+	}
+}
+
+// amortizeKeyboard is the second-level menu shown after tapping Amortize.
+func amortizeKeyboard(txID string) models.InlineKeyboardMarkup {
+	return models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
 				{Text: "1 Week", CallbackData: "amort:1w:" + txID},
 				{Text: "1 Month", CallbackData: "amort:1m:" + txID},
 				{Text: "1 Year", CallbackData: "amort:1y:" + txID},
 			},
 			{
-				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
+				{Text: "⬅️ Back", CallbackData: "menu:main:" + txID},
 			},
 		},
 	}
