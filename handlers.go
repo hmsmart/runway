@@ -32,7 +32,7 @@ func handleHealthz(store *database.Store) http.HandlerFunc {
 		w.Write([]byte("ok"))
 	}
 }
-func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cfg *Config) http.HandlerFunc {
+func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		slog.Info("unwrapping pubtoken exchange request", "for", ip)
@@ -90,7 +90,7 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		slog.Info("successfully added new item to database", "for", ip)
 		// fire and forget the heavy stuff; persistCtx outlives the request
 		go func() {
-			if err := syncItem(persistCtx, item.ItemId, accessToken, nil, plaidClient, store, cfg); err != nil {
+			if err := syncItem(persistCtx, item.ItemId, accessToken, nil, plaidClient, store, cfg, notify); err != nil {
 				slog.Error("post-link sync failed", "item", item.ItemId, "err", err)
 			}
 		}()

@@ -15,6 +15,8 @@ import (
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
+type TransactionNotifier func(ctx context.Context, tx sqlcgen.UpsertTransactionParams)
+
 // inFlightSyncs prevents the same item from syncing concurrently, e.g. a
 // link request arriving while the startup sweep is still running.
 var inFlightSyncs sync.Map
@@ -22,7 +24,7 @@ var inFlightSyncs sync.Map
 // syncItem is the single entry point for all sync triggers: it refreshes the
 // item's accounts, then pulls transactions from the given cursor. Accounts go
 // first so transaction rows never hit a missing account_id foreign key.
-func syncItem(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config) error {
+func syncItem(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) error {
 	if _, busy := inFlightSyncs.LoadOrStore(itemID, struct{}{}); busy {
 		slog.Info("sync already in progress, skipping", "item", itemID)
 		return nil
@@ -31,13 +33,13 @@ func syncItem(ctx context.Context, itemID string, accessToken string, cursor *st
 	if err := syncAllAccounts(ctx, itemID, accessToken, plaidClient, store, cfg); err != nil {
 		return fmt.Errorf("sync accounts: %w", err)
 	}
-	if err := syncTransactions(ctx, itemID, accessToken, cursor, plaidClient, store, cfg); err != nil {
+	if err := syncTransactions(ctx, itemID, accessToken, cursor, plaidClient, store, cfg, notify); err != nil {
 		return fmt.Errorf("sync transactions: %w", err)
 	}
 	return nil
 }
 
-func syncTransactions(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config) error {
+func syncTransactions(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) error {
 	var added, modified, removed int
 	for hasMore := true; hasMore; {
 		resp, err := fetchTransactionsPage(ctx, accessToken, cursor, plaidClient, cfg)
@@ -46,7 +48,7 @@ func syncTransactions(ctx context.Context, itemID string, accessToken string, cu
 			return err
 		}
 		nextCursor := resp.GetNextCursor()
-		if err := persistTransactionsPage(ctx, itemID, resp, nextCursor, store, cfg); err != nil {
+		if err := persistTransactionsPage(ctx, itemID, resp, nextCursor, store, cfg, notify); err != nil {
 			slog.Error("failed to persist transactions", "cursor", cursorValue(cursor), "item", itemID, "err", err)
 			return err
 		}
@@ -74,18 +76,23 @@ func fetchTransactionsPage(ctx context.Context, accessToken string, cursor *stri
 // persistTransactionsPage writes one page of sync results and advances the
 // item's cursor in the same database transaction, so a crash mid-sync resumes
 // from the last completed page instead of re-downloading everything.
-func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config) error {
+
+func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config, notify TransactionNotifier) error {
 	now := time.Now()
 	return store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
 		for _, tx := range resp.GetAdded() {
-			if err := q.UpsertTransaction(ctx, transactionParams(tx, cfg)); err != nil {
+			params := transactionParams(tx, cfg)
+			if err := q.UpsertTransaction(ctx, params); err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
 			}
+			notify(ctx, params)
 		}
 		for _, tx := range resp.GetModified() {
+			params := transactionParams(tx, cfg)
 			if err := q.UpsertTransaction(ctx, transactionParams(tx, cfg)); err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
 			}
+			notify(ctx, params)
 		}
 		for _, tx := range resp.GetRemoved() {
 			if err := q.SoftDeleteTransaction(ctx, tx.GetTransactionId()); err != nil {
