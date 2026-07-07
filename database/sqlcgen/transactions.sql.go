@@ -10,38 +10,26 @@ import (
 	"database/sql"
 )
 
-const promotePending = `-- name: PromotePending :exec
-UPDATE transactions
-SET plaid_tx_id = ?,
-    date = ?,
-    amount = ?,
-    name = ?,
-    merchant_name = ?,
-    pending = 0,
-    raw_json = ?
-WHERE plaid_tx_id = ? AND pending = 1
+const excludeTransaction = `-- name: ExcludeTransaction :exec
+UPDATE transactions SET excluded = 1 WHERE tx_id = ?
 `
 
-type PromotePendingParams struct {
-	PlaidTxID    string         `json:"plaid_tx_id"`
-	Date         string         `json:"date"`
-	Amount       float64        `json:"amount"`
-	Name         sql.NullString `json:"name"`
-	MerchantName sql.NullString `json:"merchant_name"`
-	RawJson      sql.NullString `json:"raw_json"`
-	PlaidTxID_2  string         `json:"plaid_tx_id_2"`
+func (q *Queries) ExcludeTransaction(ctx context.Context, txID string) error {
+	_, err := q.db.ExecContext(ctx, excludeTransaction, txID)
+	return err
 }
 
-func (q *Queries) PromotePending(ctx context.Context, arg PromotePendingParams) error {
-	_, err := q.db.ExecContext(ctx, promotePending,
-		arg.PlaidTxID,
-		arg.Date,
-		arg.Amount,
-		arg.Name,
-		arg.MerchantName,
-		arg.RawJson,
-		arg.PlaidTxID_2,
-	)
+const setAmortEnd = `-- name: SetAmortEnd :exec
+UPDATE transactions SET amort_end = date("date", CAST(?1 AS TEXT)) WHERE tx_id = ?2
+`
+
+type SetAmortEndParams struct {
+	Modifier string `json:"modifier"`
+	TxID     string `json:"tx_id"`
+}
+
+func (q *Queries) SetAmortEnd(ctx context.Context, arg SetAmortEndParams) error {
+	_, err := q.db.ExecContext(ctx, setAmortEnd, arg.Modifier, arg.TxID)
 	return err
 }
 
@@ -55,7 +43,7 @@ func (q *Queries) SoftDeleteTransaction(ctx context.Context, plaidTxID string) e
 	return err
 }
 
-const upsertTransaction = `-- name: UpsertTransaction :exec
+const upsertTransaction = `-- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, amount,
     name, merchant_name, category_primary, category_detailed,
@@ -71,7 +59,9 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     category_detailed = excluded.category_detailed,
     payment_channel = excluded.payment_channel,
     pending = excluded.pending,
+    removed_at = NULL,
     raw_json = excluded.raw_json
+RETURNING tx_id
 `
 
 type UpsertTransactionParams struct {
@@ -89,8 +79,8 @@ type UpsertTransactionParams struct {
 	RawJson          sql.NullString `json:"raw_json"`
 }
 
-func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) error {
-	_, err := q.db.ExecContext(ctx, upsertTransaction,
+func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, upsertTransaction,
 		arg.TxID,
 		arg.PlaidTxID,
 		arg.AccountID,
@@ -104,5 +94,7 @@ func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionPa
 		arg.Pending,
 		arg.RawJson,
 	)
-	return err
+	var tx_id string
+	err := row.Scan(&tx_id)
+	return tx_id, err
 }

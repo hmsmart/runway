@@ -1,4 +1,4 @@
--- name: UpsertTransaction :exec
+-- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, amount,
     name, merchant_name, category_primary, category_detailed,
@@ -14,19 +14,16 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     category_detailed = excluded.category_detailed,
     payment_channel = excluded.payment_channel,
     pending = excluded.pending,
-    raw_json = excluded.raw_json;
+    removed_at = NULL,
+    raw_json = excluded.raw_json
+RETURNING tx_id;
 
 -- name: SoftDeleteTransaction :exec
 UPDATE transactions SET removed_at = datetime('now')
 WHERE plaid_tx_id = ?;
 
--- name: PromotePending :exec
-UPDATE transactions
-SET plaid_tx_id = ?,
-    date = ?,
-    amount = ?,
-    name = ?,
-    merchant_name = ?,
-    pending = 0,
-    raw_json = ?
-WHERE plaid_tx_id = ? AND pending = 1;
+-- name: ExcludeTransaction :exec
+UPDATE transactions SET excluded = 1 WHERE tx_id = ?;
+
+-- name: SetAmortEnd :exec
+UPDATE transactions SET amort_end = date("date", CAST(sqlc.arg(modifier) AS TEXT)) WHERE tx_id = sqlc.arg(tx_id);

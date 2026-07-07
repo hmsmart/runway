@@ -11,7 +11,7 @@ import (
 )
 
 const getAccountById = `-- name: GetAccountById :one
-SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_currency_code, type, subtype, tracked, raw_json, created_at, last_synced_at FROM accounts WHERE account_id = ? AND item_id = ?
+SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_currency_code, type, subtype, raw_json, created_at, last_synced_at, tracked FROM accounts WHERE account_id = ? AND item_id = ?
 `
 
 type GetAccountByIdParams struct {
@@ -32,16 +32,16 @@ func (q *Queries) GetAccountById(ctx context.Context, arg GetAccountByIdParams) 
 		&i.IsoCurrencyCode,
 		&i.Type,
 		&i.Subtype,
-		&i.Tracked,
 		&i.RawJson,
 		&i.CreatedAt,
 		&i.LastSyncedAt,
+		&i.Tracked,
 	)
 	return i, err
 }
 
 const getAllAccounts = `-- name: GetAllAccounts :many
-SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_currency_code, type, subtype, tracked, raw_json, created_at, last_synced_at FROM accounts WHERE tracked = 1 ORDER BY created_at DESC
+SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_currency_code, type, subtype, raw_json, created_at, last_synced_at, tracked FROM accounts WHERE tracked = 1 ORDER BY created_at DESC
 `
 
 func (q *Queries) GetAllAccounts(ctx context.Context) ([]Account, error) {
@@ -63,10 +63,10 @@ func (q *Queries) GetAllAccounts(ctx context.Context) ([]Account, error) {
 			&i.IsoCurrencyCode,
 			&i.Type,
 			&i.Subtype,
-			&i.Tracked,
 			&i.RawJson,
 			&i.CreatedAt,
 			&i.LastSyncedAt,
+			&i.Tracked,
 		); err != nil {
 			return nil, err
 		}

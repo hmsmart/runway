@@ -19,10 +19,10 @@ type Account struct {
 	IsoCurrencyCode  sql.NullString  `json:"iso_currency_code"`
 	Type             sql.NullString  `json:"type"`
 	Subtype          sql.NullString  `json:"subtype"`
-	Tracked          int64           `json:"tracked"`
 	RawJson          sql.NullString  `json:"raw_json"`
 	CreatedAt        time.Time       `json:"created_at"`
 	LastSyncedAt     sql.NullTime    `json:"last_synced_at"`
+	Tracked          int64           `json:"tracked"`
 }
 
 type DailySpend struct {
@@ -42,14 +42,6 @@ type Item struct {
 	Cursor          sql.NullString `json:"cursor"`
 	CreatedAt       time.Time      `json:"created_at"`
 	LastSyncedAt    sql.NullTime   `json:"last_synced_at"`
-}
-
-type TelegramCallback struct {
-	CbToken   string        `json:"cb_token"`
-	TxID      string        `json:"tx_id"`
-	Action    string        `json:"action"`
-	MsgID     sql.NullInt64 `json:"msg_id"`
-	CreatedAt int64         `json:"created_at"`
 }
 
 type Transaction struct {
