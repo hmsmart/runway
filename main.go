@@ -48,7 +48,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
 	notify := tg.NotifyTransaction
-	tg.RegisterHandlers(store)
+	tg.RegisterHandlers(ctx, store)
 	go tg.bot.Start(ctx)
 	slog.Info("telegram setup")
 

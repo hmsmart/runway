@@ -53,7 +53,17 @@ var amortPeriods = map[string]struct {
 	"1y": {"+1 year", "1 year"},
 }
 
-func (t *TelegramBot) RegisterHandlers(store *database.Store) {
+func (t *TelegramBot) RegisterHandlers(ctx context.Context, store *database.Store) {
+	// Populate the client-side "/" command menu; non-fatal if it fails.
+	_, err := t.bot.SetMyCommands(ctx, &bot.SetMyCommandsParams{
+		Commands: []models.BotCommand{
+			{Command: "ping", Description: "Check the bot is alive"},
+		},
+	})
+	if err != nil {
+		slog.Error("failed to set bot command menu", "err", err)
+	}
+
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/ping", bot.MatchTypeExact,
 		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			slog.Info("got ping", "chatID", update.Message.Chat.ID)
