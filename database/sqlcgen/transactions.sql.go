@@ -10,15 +10,6 @@ import (
 	"database/sql"
 )
 
-const excludeTransaction = `-- name: ExcludeTransaction :exec
-UPDATE transactions SET excluded = 1 WHERE tx_id = ?
-`
-
-func (q *Queries) ExcludeTransaction(ctx context.Context, txID string) error {
-	_, err := q.db.ExecContext(ctx, excludeTransaction, txID)
-	return err
-}
-
 const getTransaction = `-- name: GetTransaction :one
 SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, payment_channel, pending, removed_at, amort_end, excluded, raw_json FROM transactions WHERE tx_id = ?
 `
@@ -57,6 +48,20 @@ type SetAmortEndParams struct {
 
 func (q *Queries) SetAmortEnd(ctx context.Context, arg SetAmortEndParams) error {
 	_, err := q.db.ExecContext(ctx, setAmortEnd, arg.Modifier, arg.TxID)
+	return err
+}
+
+const setExcluded = `-- name: SetExcluded :exec
+UPDATE transactions SET excluded = ? WHERE tx_id = ?
+`
+
+type SetExcludedParams struct {
+	Excluded int64  `json:"excluded"`
+	TxID     string `json:"tx_id"`
+}
+
+func (q *Queries) SetExcluded(ctx context.Context, arg SetExcludedParams) error {
+	_, err := q.db.ExecContext(ctx, setExcluded, arg.Excluded, arg.TxID)
 	return err
 }
 

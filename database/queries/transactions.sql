@@ -25,8 +25,8 @@ SELECT * FROM transactions WHERE tx_id = ?;
 UPDATE transactions SET removed_at = datetime('now')
 WHERE plaid_tx_id = ?;
 
--- name: ExcludeTransaction :exec
-UPDATE transactions SET excluded = 1 WHERE tx_id = ?;
+-- name: SetExcluded :exec
+UPDATE transactions SET excluded = ? WHERE tx_id = ?;
 
 -- name: SetAmortEnd :exec
 UPDATE transactions SET amort_end = date("date", CAST(sqlc.arg(modifier) AS TEXT)) WHERE tx_id = sqlc.arg(tx_id);

@@ -71,32 +71,42 @@ func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 				return
 			}
 			menu, txID := parts[1], parts[2]
-			var kb models.InlineKeyboardMarkup
 			switch menu {
 			case "amort":
-				kb = amortizeKeyboard(txID)
+				t.swapKeyboard(ctx, b, update, amortizeKeyboard(txID))
 			case "main":
-				kb = transactionKeyboard(txID)
+				// The main keyboard depends on the row's excluded state, so
+				// rebuild the whole message from the database.
+				t.refreshMessage(ctx, b, update, store, txID)
 			default:
 				t.answerCallback(ctx, b, update, "Something went wrong")
 				return
 			}
-			t.swapKeyboard(ctx, b, update, kb)
 			t.answerCallback(ctx, b, update, "")
 		}),
 	)
-	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "exclude:", bot.MatchTypePrefix,
-		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
-			txID := strings.TrimPrefix(update.CallbackQuery.Data, "exclude:")
-			if err := store.ExcludeTransaction(ctx, txID); err != nil {
-				slog.Error("failed to exclude transaction", "tx", txID, "err", err)
+	// exclude:/include: toggle the excluded flag; the refreshed keyboard
+	// offers whichever action applies to the row's new state.
+	excludeHandler := func(prefix string, excluded int64, toast string) bot.HandlerFunc {
+		return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			txID := strings.TrimPrefix(update.CallbackQuery.Data, prefix)
+			err := store.SetExcluded(ctx, sqlcgen.SetExcludedParams{
+				Excluded: excluded,
+				TxID:     txID,
+			})
+			if err != nil {
+				slog.Error("failed to set transaction exclusion", "tx", txID, "excluded", excluded, "err", err)
 				t.answerCallback(ctx, b, update, "Something went wrong")
 				return
 			}
 			t.refreshMessage(ctx, b, update, store, txID)
-			t.answerCallback(ctx, b, update, "Excluded from spend")
-		}),
-	)
+			t.answerCallback(ctx, b, update, toast)
+		}
+	}
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "exclude:", bot.MatchTypePrefix,
+		t.userFilter(excludeHandler("exclude:", 1, "Excluded from spend")))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "include:", bot.MatchTypePrefix,
+		t.userFilter(excludeHandler("include:", 0, "Included in spend")))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "amort:", bot.MatchTypePrefix,
 		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			parts := strings.SplitN(update.CallbackQuery.Data, ":", 3)
@@ -159,7 +169,7 @@ func (t *TelegramBot) refreshMessage(ctx context.Context, b *bot.Bot, update *mo
 		MessageID:   msg.ID,
 		Text:        formatTransactionMessage(tx),
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: transactionKeyboard(txID),
+		ReplyMarkup: transactionKeyboard(txID, tx.Excluded == 1),
 	})
 	if err != nil {
 		slog.Error("failed to refresh transaction message", "tx", txID, "err", err)
@@ -188,19 +198,23 @@ func (t *TelegramBot) NotifyTransaction(ctx context.Context, tx sqlcgen.UpsertTr
 		ChatID:      t.chatID,
 		Text:        formatTransactionMessage(transactionFromParams(tx)),
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: transactionKeyboard(tx.TxID),
+		ReplyMarkup: transactionKeyboard(tx.TxID, false),
 	})
 	if err != nil {
 		slog.Error("failed to send transaction notification", "tx", tx.TxID, "err", err)
 	}
 }
 
-func transactionKeyboard(txID string) models.InlineKeyboardMarkup {
+func transactionKeyboard(txID string, excluded bool) models.InlineKeyboardMarkup {
+	excludeBtn := models.InlineKeyboardButton{Text: "🚫 Exclude", CallbackData: "exclude:" + txID}
+	if excluded {
+		excludeBtn = models.InlineKeyboardButton{Text: "✅ Include", CallbackData: "include:" + txID}
+	}
 	return models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
 				{Text: "📊 Amortize", CallbackData: "menu:amort:" + txID},
-				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
+				excludeBtn,
 			},
 		},
 	}
