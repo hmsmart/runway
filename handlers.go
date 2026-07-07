@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -108,6 +109,7 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		fmt.Println("im a chud")
 		if !store.Tokens.ConsumeToken(token) {
 			http.Error(w, "bad token", http.StatusBadRequest)
 			return

@@ -85,8 +85,13 @@ func (t *TelegramBot) RegisterHandlers(ctx context.Context, store *database.Stor
 			params.Set("tgid", strconv.FormatInt(update.Message.Chat.ID, 10))
 			linkURL := "https://gpws.kawaiide.su/link?" + params.Encode()
 			b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    update.Message.Chat.ID,
-				Text:      formatLinkMessage(linkURL),
+				ChatID: update.Message.Chat.ID,
+				Text:   formatLinkMessage(),
+				ReplyMarkup: &models.InlineKeyboardMarkup{
+					InlineKeyboard: [][]models.InlineKeyboardButton{{
+						{Text: "🔗 Link Account", URL: linkURL},
+					}},
+				},
 				ParseMode: "HTML",
 			})
 		}),
@@ -285,14 +290,11 @@ func transactionFromParams(p sqlcgen.UpsertTransactionParams) sqlcgen.Transactio
 	}
 }
 
-func formatLinkMessage(url string) string {
+func formatLinkMessage() string {
 	return fmt.Sprintf(
-		"🔗 <b>Connect Your Bank Account</b>\n\n"+
-			"Tap the link below to securely connect your account through Plaid. "+
-			"This link is <b>single-use</b> and expires in 30 minutes.\n\n"+
-			"<a href=\"%s\">Open Plaid Link</a>",
-		url,
-	)
+		"🔗 <b>Connect Your Bank Account</b>\n\n" +
+			"Tap the link below to securely connect your account through Plaid. " +
+			"This link is <b>single-use</b> and expires in 30 minutes.\n\n")
 }
 
 func formatTransactionMessage(tx sqlcgen.Transaction) string {

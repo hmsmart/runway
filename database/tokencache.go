@@ -2,7 +2,7 @@ package database
 
 import (
 	"crypto/rand"
-	"encoding/base64"
+	"encoding/base32"
 	"sync"
 	"time"
 )
@@ -50,10 +50,7 @@ func (tc *tokenCache) ConsumeToken(token string) bool {
 func (tc *tokenCache) GenerateToken() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	token := randomToken(16)
-	for _, has := tc.tokens[token]; has; {
-		token = randomToken(16)
-	}
+	token := randomToken(8)
 	exp := time.Now().Add(30 * time.Minute)
 	tc.tokens[token] = exp
 	return token
@@ -62,5 +59,5 @@ func (tc *tokenCache) GenerateToken() string {
 func randomToken(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
+	return base32.StdEncoding.EncodeToString(b)
 }
