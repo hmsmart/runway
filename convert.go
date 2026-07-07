@@ -78,7 +78,8 @@ func displayCategory(raw string) string {
 	if d, ok := categoryDisplay[raw]; ok {
 		return d
 	}
-	// Fallback for anything new Plaid adds
+	// Fallback for anything new Plaid adds. The Caser is built per call on
+	// purpose: cases.Caser is stateful and not safe for concurrent use.
 	s := strings.ReplaceAll(raw, "_", " ")
 	return cases.Title(language.English).String(strings.ToLower(s))
 }

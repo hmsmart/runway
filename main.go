@@ -3,21 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"html"
 	"log"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 	"github.com/hmsmart/runway/database"
-	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -50,22 +44,10 @@ func run(ctx context.Context) error {
 	//Connect to Telegram
 
 	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId)
-	//Setup TG callback
-	notify := func(ctx context.Context, tx sqlcgen.UpsertTransactionParams) {
-		slog.Info("New Transaction", "id", tx.TxID, "PlTx", tx.PlaidTxID, "amt", tx.Amount)
-		if tx.Amount < 0 {
-			return
-		}
-		tg.bot.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:      cfg.TGChatId,
-			Text:        formatTransactionMessage(tx),
-			ParseMode:   models.ParseModeHTML,
-			ReplyMarkup: transactionKeyboard(tx.TxID),
-		})
-	}
 	if err != nil {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
+	notify := tg.NotifyTransaction
 	tg.RegisterHandlers(store)
 	go tg.bot.Start(ctx)
 	slog.Info("telegram setup")
@@ -123,66 +105,4 @@ func run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
-}
-
-func transactionKeyboard(txID string) models.InlineKeyboardMarkup {
-	return models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{
-			{
-				{Text: "📊 Amortize", CallbackData: "noop"},
-			},
-			{
-				{Text: "1 Week", CallbackData: "amort:1w:" + txID},
-				{Text: "1 Month", CallbackData: "amort:1m:" + txID},
-				{Text: "1 Year", CallbackData: "amort:1y:" + txID},
-			},
-			{
-				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
-			},
-		},
-	}
-}
-
-func formatTransactionMessage(tx sqlcgen.UpsertTransactionParams) string {
-	var b strings.Builder
-
-	// Header — merchant or name, fallback to "Unknown"
-	label := stringOr(tx.MerchantName, stringOr(tx.Name, "Unknown"))
-
-	// Positive amount = money out (debit), negative = money in (credit)
-	var emoji, sign string
-	if tx.Amount >= 0 {
-		emoji = "💸"
-		sign = "-"
-	} else {
-		emoji = "💰"
-		sign = "+"
-	}
-	absAmount := math.Abs(tx.Amount)
-
-	b.WriteString(fmt.Sprintf("%s <b>%s$%.2f</b>  %s\n", emoji, sign, absAmount, html.EscapeString(label)))
-
-	if tx.CategoryPrimary.Valid {
-		cat := categoryDisplay[tx.CategoryPrimary.String]
-		if cat == "" {
-			cat = displayCategory(tx.CategoryPrimary.String)
-		}
-		if tx.CategoryDetailed.Valid {
-			cat += " › " + displayCategory(tx.CategoryDetailed.String)
-
-		}
-		b.WriteString(fmt.Sprintf("🏷 %s\n", html.EscapeString(cat)))
-	}
-
-	b.WriteString(fmt.Sprintf("📅 %s", tx.Date))
-
-	if tx.PaymentChannel.Valid {
-		b.WriteString(fmt.Sprintf("  ·  %s", html.EscapeString(tx.PaymentChannel.String)))
-	}
-
-	if tx.Pending == 1 {
-		b.WriteString("\n⏳ <i>pending</i>")
-	}
-
-	return b.String()
 }

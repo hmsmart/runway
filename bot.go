@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
 	"log/slog"
+	"math"
+	"strings"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/hmsmart/runway/database"
+	"github.com/hmsmart/runway/database/sqlcgen"
 )
 
 type TelegramBot struct {
@@ -38,6 +42,17 @@ func (t *TelegramBot) userFilter(next bot.HandlerFunc) bot.HandlerFunc {
 	}
 }
 
+// amortPeriods maps the callback period token to a SQLite date modifier and a
+// human label for the confirmation toast.
+var amortPeriods = map[string]struct {
+	modifier string
+	label    string
+}{
+	"1w": {"+7 days", "1 week"},
+	"1m": {"+1 month", "1 month"},
+	"1y": {"+1 year", "1 year"},
+}
+
 func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/ping", bot.MatchTypeExact,
 		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -48,4 +63,132 @@ func (t *TelegramBot) RegisterHandlers(store *database.Store) {
 			})
 		}),
 	)
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "noop", bot.MatchTypeExact,
+		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			t.answerCallback(ctx, b, update, "")
+		}),
+	)
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "exclude:", bot.MatchTypePrefix,
+		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			txID := strings.TrimPrefix(update.CallbackQuery.Data, "exclude:")
+			if err := store.ExcludeTransaction(ctx, txID); err != nil {
+				slog.Error("failed to exclude transaction", "tx", txID, "err", err)
+				t.answerCallback(ctx, b, update, "Something went wrong")
+				return
+			}
+			t.answerCallback(ctx, b, update, "Excluded from spend")
+		}),
+	)
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "amort:", bot.MatchTypePrefix,
+		t.userFilter(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			parts := strings.SplitN(update.CallbackQuery.Data, ":", 3)
+			if len(parts) != 3 {
+				t.answerCallback(ctx, b, update, "Something went wrong")
+				return
+			}
+			period, ok := amortPeriods[parts[1]]
+			txID := parts[2]
+			if !ok {
+				t.answerCallback(ctx, b, update, "Something went wrong")
+				return
+			}
+			err := store.SetAmortEnd(ctx, sqlcgen.SetAmortEndParams{
+				Modifier: period.modifier,
+				TxID:     txID,
+			})
+			if err != nil {
+				slog.Error("failed to amortize transaction", "tx", txID, "err", err)
+				t.answerCallback(ctx, b, update, "Something went wrong")
+				return
+			}
+			t.answerCallback(ctx, b, update, "Amortizing over "+period.label)
+		}),
+	)
+}
+
+func (t *TelegramBot) answerCallback(ctx context.Context, b *bot.Bot, update *models.Update, text string) {
+	_, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: update.CallbackQuery.ID,
+		Text:            text,
+	})
+	if err != nil {
+		slog.Error("failed to answer callback query", "err", err)
+	}
+}
+
+// NotifyTransaction announces a newly synced transaction to the configured
+// chat. Positive amounts are money out (Plaid's convention); credits are
+// skipped.
+func (t *TelegramBot) NotifyTransaction(ctx context.Context, tx sqlcgen.UpsertTransactionParams) {
+	slog.Info("new transaction", "id", tx.TxID, "plaidTx", tx.PlaidTxID, "amt", tx.Amount)
+	if tx.Amount < 0 {
+		return
+	}
+	_, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      t.chatID,
+		Text:        formatTransactionMessage(tx),
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: transactionKeyboard(tx.TxID),
+	})
+	if err != nil {
+		slog.Error("failed to send transaction notification", "tx", tx.TxID, "err", err)
+	}
+}
+
+func transactionKeyboard(txID string) models.InlineKeyboardMarkup {
+	return models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: "📊 Amortize", CallbackData: "noop"},
+			},
+			{
+				{Text: "1 Week", CallbackData: "amort:1w:" + txID},
+				{Text: "1 Month", CallbackData: "amort:1m:" + txID},
+				{Text: "1 Year", CallbackData: "amort:1y:" + txID},
+			},
+			{
+				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
+			},
+		},
+	}
+}
+
+func formatTransactionMessage(tx sqlcgen.UpsertTransactionParams) string {
+	var b strings.Builder
+
+	// Header — merchant or name, fallback to "Unknown"
+	label := stringOr(tx.MerchantName, stringOr(tx.Name, "Unknown"))
+
+	// Positive amount = money out (debit), negative = money in (credit)
+	var emoji, sign string
+	if tx.Amount >= 0 {
+		emoji = "💸"
+		sign = "-"
+	} else {
+		emoji = "💰"
+		sign = "+"
+	}
+	absAmount := math.Abs(tx.Amount)
+
+	b.WriteString(fmt.Sprintf("%s <b>%s$%.2f</b>  %s\n", emoji, sign, absAmount, html.EscapeString(label)))
+
+	if tx.CategoryPrimary.Valid {
+		cat := displayCategory(tx.CategoryPrimary.String)
+		if tx.CategoryDetailed.Valid {
+			cat += " › " + displayCategory(tx.CategoryDetailed.String)
+		}
+		b.WriteString(fmt.Sprintf("🏷 %s\n", html.EscapeString(cat)))
+	}
+
+	b.WriteString(fmt.Sprintf("📅 %s", tx.Date))
+
+	if tx.PaymentChannel.Valid {
+		b.WriteString(fmt.Sprintf("  ·  %s", html.EscapeString(tx.PaymentChannel.String)))
+	}
+
+	if tx.Pending == 1 {
+		b.WriteString("\n⏳ <i>pending</i>")
+	}
+
+	return b.String()
 }
