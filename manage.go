@@ -15,50 +15,6 @@ import (
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
-// handleLinks lists the user's linked institutions, numbered for /unlink.
-func (t *TelegramBot) handleLinks(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
-	chatID := update.Message.Chat.ID
-	items, err := t.store.ListItemsByUser(ctx, user.ID())
-	if err != nil {
-		slog.Error("failed to list items", "chatID", chatID, "err", err)
-		t.sendText(ctx, b, chatID, errTryLater)
-		return
-	}
-	if len(items) == 0 {
-		t.sendText(ctx, b, chatID, "You have no linked accounts. Use /link to connect one.")
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("🏦 <b>Your linked accounts</b>\n")
-	for i, item := range items {
-		sb.WriteString(fmt.Sprintf("\n<b>%d.</b> %s — linked %s\n",
-			i+1, html.EscapeString(stringOr(item.InstitutionName, "Unknown institution")),
-			item.CreatedAt.Format("Jan 2, 2006")))
-		accounts, err := t.store.ListAccountsByItem(ctx, item.ItemID)
-		if err != nil {
-			slog.Error("failed to list accounts", "item", item.ItemID, "err", err)
-			continue
-		}
-		for _, a := range accounts {
-			mask := ""
-			if a.Mask != nil && *a.Mask != "" {
-				mask = " ••" + html.EscapeString(*a.Mask)
-			}
-			sb.WriteString(fmt.Sprintf("      • %s%s\n", html.EscapeString(a.Name), mask))
-		}
-	}
-	sb.WriteString("\nTo unlink one, send /unlink followed by its number (e.g. /unlink 1).")
-	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    chatID,
-		Text:      sb.String(),
-		ParseMode: models.ParseModeHTML,
-	})
-	if err != nil {
-		slog.Error("failed to send links list", "chatID", chatID, "err", err)
-	}
-}
-
 // formatMoney renders an amount for user-facing text, e.g. "$1,234.56";
 // non-USD amounts get their ISO code appended.
 func formatMoney(amount float64, code *string) string {
@@ -72,10 +28,10 @@ func formatMoney(amount float64, code *string) string {
 	return s
 }
 
-// handleBalance shows the balances of every linked account, grouped by
-// institution. Balances are whatever the last sync wrote, so each group
-// carries its item's sync time.
-func (t *TelegramBot) handleBalance(ctx context.Context, b *bot.Bot, update *models.Update) {
+// handleAccounts lists the user's linked accounts and their balances,
+// grouped by institution and numbered for /unlink. Balances are whatever the
+// last sync wrote, so each institution header carries its item's sync time.
+func (t *TelegramBot) handleAccounts(ctx context.Context, b *bot.Bot, update *models.Update) {
 	user := UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	items, err := t.store.ListItemsByUser(ctx, user.ID())
@@ -85,14 +41,14 @@ func (t *TelegramBot) handleBalance(ctx context.Context, b *bot.Bot, update *mod
 		return
 	}
 	if len(items) == 0 {
-		t.sendText(ctx, b, chatID, "You have no linked accounts. Use /link to connect one.")
+		t.sendText(ctx, b, chatID, "You have no linked accounts. Use <code>/link</code> to connect one.")
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("💰 <b>Account balances</b>\n")
-	for _, item := range items {
-		sb.WriteString(fmt.Sprintf("\n<b>%s</b>",
-			html.EscapeString(stringOr(item.InstitutionName, "Unknown institution"))))
+	sb.WriteString("🏦 <b>Your linked accounts</b>\n")
+	for i, item := range items {
+		sb.WriteString(fmt.Sprintf("\n<b>%d.</b> %s",
+			i+1, html.EscapeString(stringOr(item.InstitutionName, "Unknown institution"))))
 		if item.LastSyncedAt != nil {
 			sb.WriteString(fmt.Sprintf("  <i>(synced %s)</i>", item.LastSyncedAt.Local().Format("Jan 2, 3:04 PM")))
 		}
@@ -126,13 +82,14 @@ func (t *TelegramBot) handleBalance(ctx context.Context, b *bot.Bot, update *mod
 			sb.WriteString("\n")
 		}
 	}
+	sb.WriteString("\nTo unlink one, send <code>/unlink</code> followed by its number (e.g. <code>/unlink 1</code>).")
 	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      sb.String(),
 		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil {
-		slog.Error("failed to send balance list", "chatID", chatID, "err", err)
+		slog.Error("failed to send accounts list", "chatID", chatID, "err", err)
 	}
 }
 
@@ -144,7 +101,7 @@ func (t *TelegramBot) handleUnlink(ctx context.Context, b *bot.Bot, update *mode
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) != 2 {
 		t.sendText(ctx, b, chatID,
-			"To unlink, send /unlink followed by the account number from /links (e.g. /unlink 1).")
+			"To unlink, send <code>/unlink</code> followed by the account number from <code>/accounts</code> (e.g. <code>/unlink 1</code>).")
 		return
 	}
 	items, err := t.store.ListItemsByUser(ctx, user.ID())
@@ -153,11 +110,11 @@ func (t *TelegramBot) handleUnlink(ctx context.Context, b *bot.Bot, update *mode
 		t.sendText(ctx, b, chatID, errTryLater)
 		return
 	}
-	// /links displays 1-based numbers, so translate back to a slice index.
+	// /accounts displays 1-based numbers, so translate back to a slice index.
 	n, err := strconv.Atoi(parts[1])
 	if err != nil || n < 1 || n > len(items) {
 		t.sendText(ctx, b, chatID,
-			"That doesn't match one of your account numbers — check /links and try again.")
+			"That doesn't match one of your account numbers — check <code>/accounts</code> and try again.")
 		return
 	}
 	item := items[n-1]

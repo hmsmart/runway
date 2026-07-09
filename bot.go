@@ -154,18 +154,21 @@ func (t *TelegramBot) deny(ctx context.Context, b *bot.Bot, update *models.Updat
 	// telling them to /register would just send them in a circle.
 	if UserFromContext(ctx) == nil {
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"You're not authorized. If you have an invite code, send /register followed by the code to get started.")
+			"You're not authorized. If you have an invite code, send <code>/register</code> followed by the code to get started.")
 		return
 	}
 	t.sendText(ctx, b, update.Message.Chat.ID, "You don't have permission to do that.")
 }
 
-// sendText sends a plain-text message and logs delivery failures. Sends that
-// need markup or formatting call SendMessage directly.
+// sendText sends an HTML-formatted message and logs delivery failures. Every
+// caller's text is a static string we wrote ourselves (command mentions
+// wrapped in <code>), never unescaped user input — callers embedding
+// arbitrary content must escape it or call SendMessage directly instead.
 func (t *TelegramBot) sendText(ctx context.Context, b *bot.Bot, chatID int64, text string) {
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil {
 		slog.Error("failed to send message", "chatID", chatID, "err", err)
@@ -200,10 +203,14 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleBudget, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
-	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/links", bot.MatchTypeExact,
-		chain(t.handleLinks, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
-	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/balance", bot.MatchTypeExact,
-		chain(t.handleBalance, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/accounts", bot.MatchTypeExact,
+		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	// Exact must be registered before Prefix: handlers are tried in order and
+	// the first match wins, so bare "/unlink" hits this one and shows the
+	// account list, while "/unlink 1" fails the exact match and falls
+	// through to the prefix handler below.
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unlink", bot.MatchTypeExact,
+		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unlink", bot.MatchTypePrefix,
 		chain(t.handleUnlink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unregister", bot.MatchTypeExact,
@@ -240,19 +247,19 @@ func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *model
 			return
 		}
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"Welcome back to Runway! You're all set up — /link to connect another account, /balance to check your accounts, "+
-				"or /budget to adjust your monthly discretionary budget. /help lists everything I can do.")
+			"Welcome back to Runway! You're all set up — <code>/link</code> to connect another account, <code>/accounts</code> to check your "+
+				"accounts and balances, or <code>/budget</code> to adjust your monthly discretionary budget. <code>/help</code> lists everything I can do.")
 		return
 	}
 	t.sendText(ctx, b, update.Message.Chat.ID,
 		"Welcome to Runway! I help you keep your monthly discretionary spending — the stuff you choose to spend, "+
 			"like dining out or shopping, not rent or bills — under a budget you set.\n\n"+
 			"Runway is invite-only, so you'll need an invite code from an existing user. Once you have one:\n"+
-			"1. /register the code\n"+
-			"2. /budget to set your monthly discretionary budget\n"+
-			"3. /link to connect a bank account\n\n"+
-			"There's no rush — whenever you have a code, send /register followed by it (e.g. /register ABCD-2234). "+
-			"/help explains more.")
+			"1. <code>/register</code> the code\n"+
+			"2. <code>/budget</code> to set your monthly discretionary budget\n"+
+			"3. <code>/link</code> to connect a bank account\n\n"+
+			"There's no rush — whenever you have a code, send <code>/register</code> followed by it (e.g. <code>/register ABCD2234</code>). "+
+			"<code>/help</code> explains more.")
 }
 
 // handleHelp explains what Runway does and which commands are available,
@@ -270,27 +277,26 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"Getting started:\n" +
 			"1. <code>/register CODE</code> — join with an invite code\n" +
 			"2. <code>/budget AMOUNT</code> — set your monthly discretionary budget\n" +
-			"3. /link — connect a bank account\n\n" +
-			"/ping — check that I'm up"
+			"3. <code>/link</code> — connect a bank account\n\n" +
+			"<code>/ping</code> — check that I'm up"
 	case user.Discretionary() == nil:
 		text = "🧭 <b>Runway commands</b>\n\n" +
 			"<code>/budget AMOUNT</code> — set your monthly discretionary budget (required before linking)\n" +
-			"/unregister — delete your data and leave\n\n" +
-			"Once your budget is set, /link unlocks so you can connect a bank account."
+			"<code>/unregister</code> — delete your data and leave\n\n" +
+			"Once your budget is set, <code>/link</code> unlocks so you can connect a bank account."
 	default:
 		text = "🧭 <b>Runway commands</b>\n\n" +
 			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
-			"/link — connect a bank account\n" +
-			"/links — list your linked accounts\n" +
-			"<code>/unlink N</code> — unlink an account by number\n" +
-			"/balance — show your account balances\n"
+			"<code>/link</code> — connect a bank account\n" +
+			"<code>/accounts</code> — list your linked accounts and balances\n" +
+			"<code>/unlink [N]</code> — list your accounts, or unlink one by number\n"
 		if user.Has(domains.PermissionInvite) {
-			text += "/invite — create an invite code for a new user\n"
+			text += "<code>/invite</code> — create an invite code for a new user\n"
 		}
-		text += "/unregister — delete your data and leave\n\n" +
-			"Each transaction I send has two buttons: <b>📊 Spread</b> spreads a big one-off purchase across weeks " +
-			"or months so it doesn't blow your budget in a single day, and <b>🚫 Exclude</b> leaves it out of your " +
-			"discretionary spend entirely (handy for things like a rent payment or transfer that slipped through)."
+		text += "<code>/unregister</code> — delete your data and leave\n\n" +
+			"Each transaction I send has two buttons:\n" +
+			"📊 <b>Spread</b> — spreads a big one-off purchase across weeks or months so it doesn't blow your budget in a single day\n" +
+			"🚫 <b>Exclude</b> — leaves it out of your discretionary spend entirely (handy for a rent payment or transfer that slipped through)"
 	}
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -317,7 +323,7 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 	if len(parts) != 2 {
 		slog.Info("invalid arguments passed", "chatID", update.Message.Chat.ID, "message", update.Message.Text)
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"To register, send /register followed by your invite code (e.g. /register ABCD-2234 or /register ABCD2234).")
+			"To register, send <code>/register</code> followed by your invite code (e.g. <code>/register ABCD2234</code>).")
 		return
 	}
 	regcode := strings.ToUpper(parts[1])
@@ -325,7 +331,7 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 	if !inviteCodePattern.MatchString(regcode) {
 		slog.Info("failed to validate code", "chatID", update.Message.Chat.ID, "code", regcode)
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"That invite code doesn't look right. Codes are 8 letters and digits, e.g. ABCD-2234.")
+			"That invite code doesn't look right. Codes are 8 letters and digits, e.g. ABCD2234.")
 		return
 	}
 	slog.Info("got valid registration code request, checking db", "chatID", update.Message.Chat.ID, "code", regcode)
@@ -365,7 +371,7 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 // out of the number.
 const budgetExplainer = "Think about what you spend in a typical month on things you choose — dining out, shopping, hobbies, fun. " +
 	"Leave out fixed bills like rent or mortgage, insurance, and utilities; Runway only tracks the spending you can actually control.\n\n" +
-	"When you have a number, send /budget followed by the amount (e.g. /budget 1500)."
+	"When you have a number, send <code>/budget</code> followed by the amount (e.g. <code>/budget 1500</code>)."
 
 // parseBudget turns user input like "1500", "$1,500" or "1500.50" into a
 // dollar amount, rejecting non-positive and absurd values.
@@ -395,7 +401,7 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 	if len(parts) == 1 {
 		if cur := user.Discretionary(); cur != nil {
 			t.sendText(ctx, b, update.Message.Chat.ID,
-				fmt.Sprintf("Your monthly discretionary budget is %s/month. To change it, send /budget followed by the new amount (e.g. /budget 1500).", formatDollars(*cur)))
+				fmt.Sprintf("Your monthly discretionary budget is %s/month. To change it, send <code>/budget</code> followed by the new amount (e.g. <code>/budget 1500</code>).", formatDollars(*cur)))
 			return
 		}
 		t.sendText(ctx, b, update.Message.Chat.ID,
@@ -406,7 +412,7 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 	if len(parts) != 2 || err != nil {
 		slog.Info("invalid budget amount", "chatID", update.Message.Chat.ID, "message", update.Message.Text)
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"I couldn't read that amount. Send /budget followed by a dollar amount, e.g. /budget 1500 or /budget 1,500.50.")
+			"I couldn't read that amount. Send <code>/budget</code> followed by a dollar amount, e.g. <code>/budget 1500</code> or <code>/budget 1,500.50</code>.")
 		return
 	}
 	firstTime := user.Discretionary() == nil
@@ -423,7 +429,7 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 	confirm := func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		text := fmt.Sprintf("Updated! Your monthly discretionary budget is now %s/month.", formatDollars(amt))
 		if firstTime {
-			text = fmt.Sprintf("Budget set: %s/month of discretionary spending.\n\nNow use /link to connect your first bank account and I'll start tracking against it.", formatDollars(amt))
+			text = fmt.Sprintf("Budget set: %s/month of discretionary spending.\n\nNow use <code>/link</code> to connect your first bank account and I'll start tracking against it.", formatDollars(amt))
 		}
 		t.sendText(ctx, b, update.Message.Chat.ID, text)
 	}
@@ -451,10 +457,8 @@ func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *mode
 		return
 	}
 	slog.Info("invite created", "chatID", invUser.TelegramID())
-	// Hyphenate for readability; /register strips the dash before matching.
-	displayCode := inviteCode[:4] + "-" + inviteCode[4:]
 	t.sendText(ctx, b, update.Message.Chat.ID,
-		fmt.Sprintf("Invite created! Share this invite code with your friend: %s\nThey can redeem it by sending me /register %s", displayCode, displayCode))
+		fmt.Sprintf("Invite created! Share this invite code with your friend: <code>%s</code>\nThey can redeem it by sending me <code>/register %s</code>", inviteCode, inviteCode))
 }
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
@@ -598,10 +602,9 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 		// commands themselves still work if typed — this only trims the menu.
 		if user.Discretionary() != nil {
 			cmds = append(cmds,
-				models.BotCommand{Command: "balance", Description: "Show your account balances"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
-				models.BotCommand{Command: "links", Description: "List your linked accounts"},
-				models.BotCommand{Command: "unlink", Description: "Unlink an account by number"},
+				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},
+				models.BotCommand{Command: "unlink", Description: "List accounts, or unlink one by number"},
 			)
 			if user.Has(domains.PermissionInvite) {
 				cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Create an invite code for a new user"})
@@ -831,9 +834,9 @@ func (t *TelegramBot) sendLinkedMessage(ctx context.Context, chatID int64, insti
 			"🏦 Thanks for linking <b>%s</b>!\n\n"+
 				"I'm collecting your last %d days of transactions now and will place them "+
 				"in this chat slowly and silently, so you can classify them at your convenience.\n\n"+
-				"Each one gets two buttons: <b>📊 Spread</b> spreads a big one-off purchase across weeks or months "+
-				"so it doesn't blow your budget in a single day, and <b>🚫 Exclude</b> leaves it out of your "+
-				"discretionary spend entirely (handy for things like a rent payment or transfer that slipped through).\n\n"+
+				"Each one gets two buttons:\n"+
+				"📊 <b>Spread</b> — spreads a big one-off purchase across weeks or months so it doesn't blow your budget in a single day\n"+
+				"🚫 <b>Exclude</b> — leaves it out of your discretionary spend entirely (handy for a rent payment or transfer that slipped through)\n\n"+
 				"💡 Tip: set this chat's auto-delete to 1 month (chat menu → Auto-Delete) to keep the clutter down.",
 			inst, notifyWindowDays)
 	}
