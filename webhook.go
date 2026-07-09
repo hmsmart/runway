@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/hmsmart/runway/database"
+	"github.com/hmsmart/runway/domains"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -86,7 +88,19 @@ func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg
 		}
 		// Ack immediately and sync in the background; syncCtx outlives the
 		// request, and inFlightSyncs dedupes bursts of webhooks per item.
-		syncCtx := context.WithoutCancel(r.Context())
+		usql, err := store.GetUserByID(r.Context(), item.UserID)
+		if errors.Is(err, sql.ErrNoRows) {
+			slog.Info("user not located in database", "ID", item.UserID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		} else if err != nil {
+			slog.Error("failed to query database for user", "ID", item.UserID, "err", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		u := domains.NewUser(usql)
+		syncCtx := WithUser(r.Context(), u)
+		syncCtx = context.WithoutCancel(syncCtx)
 		go func() {
 			if err := syncItem(syncCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
 				slog.Error("webhook-triggered sync failed", "item", item.ItemID, "err", err)

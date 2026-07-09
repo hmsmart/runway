@@ -9,6 +9,15 @@ import (
 	"context"
 )
 
+const clearAmortEnd = `-- name: ClearAmortEnd :exec
+UPDATE transactions SET amort_end = NULL WHERE tx_id = ?
+`
+
+func (q *Queries) ClearAmortEnd(ctx context.Context, txID string) error {
+	_, err := q.db.ExecContext(ctx, clearAmortEnd, txID)
+	return err
+}
+
 const getTransaction = `-- name: GetTransaction :one
 SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json FROM transactions WHERE tx_id = ?
 `

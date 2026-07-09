@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at FROM users WHERE id = ? and active = 1
+`
+
+func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByID, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.TgID,
+		&i.TgUsername,
+		&i.TgFirstName,
+		&i.InviteCode,
+		&i.CanInvite,
+		&i.Active,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getUserByTelegram = `-- name: GetUserByTelegram :one
 SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at FROM users WHERE tg_id = ? and active = 1
 `

@@ -158,6 +158,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleExclude("include:", 0, "Included in spend"), t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "amort:", bot.MatchTypePrefix,
 		chain(t.handleAmortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "mortize:", bot.MatchTypePrefix,
+		chain(t.handleMortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 }
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -300,7 +302,15 @@ func (t *TelegramBot) handleMenu(ctx context.Context, b *bot.Bot, update *models
 	menu, txID := parts[1], parts[2]
 	switch menu {
 	case "amort":
-		t.swapKeyboard(ctx, b, update, amortizeKeyboard(txID))
+		// The amortize menu only offers Mortize when there's an end date
+		// to clear, so read the row's current state.
+		tx, err := t.store.GetTransaction(ctx, txID)
+		if err != nil {
+			slog.Error("failed to load transaction for amortize menu", "tx", txID, "err", err)
+			t.answerCallback(ctx, b, update, "Something went wrong")
+			return
+		}
+		t.swapKeyboard(ctx, b, update, amortizeKeyboard(txID, tx.AmortEnd != nil))
 	case "main":
 		// The main keyboard depends on the row's excluded state, so
 		// rebuild the whole message from the database.
@@ -355,6 +365,18 @@ func (t *TelegramBot) handleAmortize(ctx context.Context, b *bot.Bot, update *mo
 	}
 	t.refreshMessage(ctx, b, update, txID)
 	t.answerCallback(ctx, b, update, "Amortizing over "+period.label)
+}
+
+// handleMortize clears a transaction's amortization end date.
+func (t *TelegramBot) handleMortize(ctx context.Context, b *bot.Bot, update *models.Update) {
+	txID := strings.TrimPrefix(update.CallbackQuery.Data, "mortize:")
+	if err := t.store.ClearAmortEnd(ctx, txID); err != nil {
+		slog.Error("failed to clear transaction amortization", "tx", txID, "err", err)
+		t.answerCallback(ctx, b, update, "Something went wrong")
+		return
+	}
+	t.refreshMessage(ctx, b, update, txID)
+	t.answerCallback(ctx, b, update, "Amortization removed")
 }
 
 // setCommandMenu writes the command menu a user should see given their
@@ -439,38 +461,58 @@ func (t *TelegramBot) answerCallback(ctx context.Context, b *bot.Bot, update *mo
 // chat. Positive amounts are money out (Plaid's convention); credits are
 // skipped.
 func (t *TelegramBot) NotifyTransaction(ctx context.Context, tx sqlcgen.UpsertTransactionParams) {
-	slog.Info("new transaction", "id", tx.TxID, "plaidTx", tx.PlaidTxID, "amt", tx.Amount)
+	user := UserFromContext(ctx)
+	if user == nil {
+		slog.Info("transaction not associated with user", "id", tx.TxID, "plaidTx", tx.PlaidTxID, "amt", tx.Amount)
+		return
+	}
 	if tx.Amount < 0 {
 		return
 	}
+	slog.Info("new transaction", "chatID", user.TelegramID(), "id", tx.TxID, "plaidTx", tx.PlaidTxID, "amt", tx.Amount)
 	_, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      t.chatID,
+		ChatID:      user.TelegramID(),
 		Text:        formatTransactionMessage(transactionFromParams(tx)),
 		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: transactionKeyboard(tx.TxID, false),
 	})
 	if err != nil {
-		slog.Error("failed to send transaction notification", "tx", tx.TxID, "err", err)
+		slog.Error("failed to send transaction notification", "chatID", user.TelegramID(), "tx", tx.TxID, "err", err)
 	}
 }
 
 func transactionKeyboard(txID string, excluded bool) models.InlineKeyboardMarkup {
-	excludeBtn := models.InlineKeyboardButton{Text: "🚫 Exclude", CallbackData: "exclude:" + txID}
 	if excluded {
-		excludeBtn = models.InlineKeyboardButton{Text: "✅ Include", CallbackData: "include:" + txID}
+		return models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{
+					{Text: "✅ Include", CallbackData: "include:" + txID},
+				},
+			},
+		}
 	}
 	return models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
 				{Text: "📊 Amortize", CallbackData: "menu:amort:" + txID},
-				excludeBtn,
+				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
 			},
 		},
 	}
 }
 
 // amortizeKeyboard is the second-level menu shown after tapping Amortize.
-func amortizeKeyboard(txID string) models.InlineKeyboardMarkup {
+// The period row always shows so a mis-tapped period can be corrected by
+// tapping again; Mortize (clear) only appears once the row is amortized.
+func amortizeKeyboard(txID string, amortized bool) models.InlineKeyboardMarkup {
+	bottom := []models.InlineKeyboardButton{
+		{Text: "⬅️ Back", CallbackData: "menu:main:" + txID},
+	}
+	if amortized {
+		bottom = append([]models.InlineKeyboardButton{
+			{Text: "❌ Mortize", CallbackData: "mortize:" + txID},
+		}, bottom...)
+	}
 	return models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
@@ -478,9 +520,7 @@ func amortizeKeyboard(txID string) models.InlineKeyboardMarkup {
 				{Text: "1 Month", CallbackData: "amort:1m:" + txID},
 				{Text: "1 Year", CallbackData: "amort:1y:" + txID},
 			},
-			{
-				{Text: "⬅️ Back", CallbackData: "menu:main:" + txID},
-			},
+			bottom,
 		},
 	}
 }

@@ -31,3 +31,6 @@ UPDATE transactions SET excluded = ? WHERE tx_id = ?;
 
 -- name: SetAmortEnd :exec
 UPDATE transactions SET amort_end = date("date", CAST(sqlc.arg(modifier) AS TEXT)) WHERE tx_id = sqlc.arg(tx_id);
+
+-- name: ClearAmortEnd :exec
+UPDATE transactions SET amort_end = NULL WHERE tx_id = ?;

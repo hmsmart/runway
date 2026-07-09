@@ -1,6 +1,9 @@
 -- name: GetUserByTelegram :one
 SELECT * FROM users WHERE tg_id = ? and active = 1;
 
+-- name: GetUserByID :one
+SELECT * FROM users WHERE id = ? and active = 1;
+
 -- name: RedeemInviteCode :execresult
 UPDATE users
 SET tg_id = ?, active = 1
