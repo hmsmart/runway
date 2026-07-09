@@ -34,9 +34,10 @@ go.work.sum
 
 .vscode/
 .DS_Store
-.gitignore
 data/
 tmp/
 release/
 __debug_*
-.vscode/*
+
+# Task runner checksums
+.task/

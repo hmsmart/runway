@@ -14,6 +14,8 @@ import (
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
+// clientIP is for logging only. X-Real-Ip is trusted as set by the reverse
+// proxy in front of this service; never use this value for authorization.
 func clientIP(r *http.Request) string {
 	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
 		return xri
@@ -54,7 +56,6 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			http.Error(w, "bad token", http.StatusBadRequest)
 			return
 		}
-		store.LinkTokens.Delete(body.LinkToken)
 		tgUser := cached.Value()
 		slog.Info("begin pub token exchange", "for", ip, "user", tgUser.Username())
 		exchangeRequest := plaid.NewItemPublicTokenExchangeRequest(body.PublicToken)
@@ -66,6 +67,9 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
 		}
+		// Consume the token only once the exchange succeeds, so a transient
+		// Plaid failure doesn't force the user back to /link.
+		store.LinkTokens.Delete(body.LinkToken)
 		persistCtx := context.WithoutCancel(r.Context())
 		accessToken := exchangeResponse.GetAccessToken()
 		slog.Info("successfully linked account", "for", ip)
@@ -143,9 +147,9 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 		plaidRequest := plaid.NewLinkTokenCreateRequest(
 			"Runway",
 			"en",
-			[]plaid.CountryCode{plaid.COUNTRYCODE_US},
+			cfg.PlaidCountryCodeList,
 		)
-		plaidRequest.SetProducts([]plaid.Products{plaid.PRODUCTS_TRANSACTIONS})
+		plaidRequest.SetProducts(cfg.PlaidProductList)
 		plaidRequest.SetWebhook(cfg.PlaidWebhookURL)
 		plaidRequest.SetAccountFilters(accountFilters)
 		plaidRequest.SetUser(user)
@@ -164,6 +168,8 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 		}
 		plaidLinkToken := linkTokenCreateResp.GetLinkToken()
 		store.LinkTokens.Set(plaidLinkToken, tgUser, cfg.TokenTTL)
-		templates.LinkPage(plaidLinkToken).Render(r.Context(), w)
+		if err := templates.LinkPage(plaidLinkToken).Render(r.Context(), w); err != nil {
+			slog.Error("failed to render link page", "for", ip, "err", err)
+		}
 	}
 }

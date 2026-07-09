@@ -98,9 +98,3 @@ func RandomToken(n int, b base) string {
 		return hex.EncodeToString(bytes)
 	}
 }
-
-func GenerateInviteToken() string {
-	b := make([]byte, 5)
-	rand.Read(b)
-	return base32.StdEncoding.EncodeToString(b)
-}

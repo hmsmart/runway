@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hmsmart/runway/database"
+	"github.com/hmsmart/runway/domains"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -35,7 +36,7 @@ func run(ctx context.Context) error {
 
 	store, err := database.GetStore(ctx, cfg.DBPath, cfg.TokenTTL)
 	if err != nil {
-		return fmt.Errorf("failed to open databse: %w", err)
+		return fmt.Errorf("failed to open database: %w", err)
 	}
 
 	slog.Info("connected to database", "path", cfg.DBPath)
@@ -43,7 +44,7 @@ func run(ctx context.Context) error {
 
 	//Connect to Telegram
 
-	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId, store, cfg.TokenTTL)
+	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.BaseURL, store, cfg.TokenTTL)
 	if err != nil {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
@@ -91,7 +92,15 @@ func run(ctx context.Context) error {
 				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)
 				continue
 			}
-			if err := syncItem(ctx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
+			// Notifications resolve their target chat from the context
+			// user, so load the item's owner just like the webhook path.
+			usql, err := store.GetUserByID(ctx, item.UserID)
+			if err != nil {
+				slog.Error("failed to load user for item", "item", item.ItemID, "user", item.UserID, "err", err)
+				continue
+			}
+			syncCtx := WithUser(ctx, domains.NewUser(usql))
+			if err := syncItem(syncCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
 				slog.Error("startup sync failed", "item", item.ItemID, "err", err)
 			}
 		}

@@ -211,14 +211,12 @@ func encryptedRawJSON(v json.Marshaler, id string, key []byte) *string {
 	raw, err := v.MarshalJSON()
 	if err != nil {
 		slog.Warn("discarding raw json, marshal failed", "id", id, "err", err)
-		s := ""
-		return &s
+		return nil
 	}
 	enc, err := EncryptColumnSecret(string(raw), id, key)
 	if err != nil {
 		slog.Warn("discarding raw json, encryption failed", "id", id, "err", err)
-		s := ""
-		return &s
+		return nil
 	}
 	return &enc
 }

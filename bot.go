@@ -27,17 +27,17 @@ var inviteCodePattern = regexp.MustCompile(`^[A-Z2-7]{8}$`)
 
 type TelegramBot struct {
 	bot      *bot.Bot
-	chatID   int64
+	baseURL  string
 	store    *database.Store
 	tokenTTL time.Duration
 }
 
-func NewTelegramBot(token string, chatID int64, store *database.Store, tokenTTL time.Duration) (*TelegramBot, error) {
+func NewTelegramBot(token string, baseURL string, store *database.Store, tokenTTL time.Duration) (*TelegramBot, error) {
 	b, err := bot.New(token)
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
-	return &TelegramBot{bot: b, chatID: chatID, store: store, tokenTTL: tokenTTL}, nil
+	return &TelegramBot{bot: b, baseURL: baseURL, store: store, tokenTTL: tokenTTL}, nil
 }
 
 // middleware wraps a handler with one cross-cutting step.
@@ -61,6 +61,12 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 			chatID = update.Message.Chat.ID
 		} else if update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
 			chatID = update.CallbackQuery.Message.Message.Chat.ID
+		}
+		if chatID == 0 {
+			// No resolvable chat (e.g. a callback on an inaccessible
+			// message); pass through with no user rather than querying tg_id=0.
+			next(ctx, b, update)
+			return
 		}
 		row, err := t.store.GetUserByTelegram(ctx, &chatID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -116,15 +122,25 @@ func (t *TelegramBot) deny(ctx context.Context, b *bot.Bot, update *models.Updat
 		return
 	}
 	if update.Message != nil {
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "You're not authorized. Use /register to get started.",
-		})
-		if err != nil {
-			slog.Error("failed to send denial message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"You're not authorized. If you have an invite code, send /register followed by the code to get started.")
 	}
 }
+
+// sendText sends a plain-text message and logs delivery failures. Sends that
+// need markup or formatting call SendMessage directly.
+func (t *TelegramBot) sendText(ctx context.Context, b *bot.Bot, chatID int64, text string) {
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+	})
+	if err != nil {
+		slog.Error("failed to send message", "chatID", chatID, "err", err)
+	}
+}
+
+// errTryLater is the one voice for transient failures the user can't fix.
+const errTryLater = "Something went wrong on my end — please try again later."
 
 // amortPeriods maps the callback period token to a SQLite date modifier and a
 // human label for the confirmation toast.
@@ -167,52 +183,41 @@ func (t *TelegramBot) RegisterHandlers() {
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("called start", "chatID", update.Message.Chat.ID)
+	if UserFromContext(ctx).Has(domains.PermissionActive) {
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"Welcome back to Runway! You're already registered — use /link to connect a bank account.")
+		return
+	}
+	t.sendText(ctx, b, update.Message.Chat.ID,
+		"Welcome to Runway! I watch your linked bank accounts and message you when new transactions come in.\n\n"+
+			"Runway is invite-only, so you'll need an invite code from an existing user. "+
+			"There's no rush — whenever you have one, send /register followed by the code (e.g. /register ABCD-2234).")
 }
 
 func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models.Update) {
 	user := UserFromContext(ctx)
 	slog.Info("called ping", "chatID", update.Message.Chat.ID, "registered", user != nil)
-	var err error
+	pong := "Pongthenticated"
 	if user == nil {
-		_, err = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "Unpongthenticated",
-		})
-	} else {
-		_, err = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "Pongthenticated",
-		})
+		pong = "Unpongthenticated"
 	}
-	if err != nil {
-		slog.Error("failed to send pong", "chatID", update.Message.Chat.ID, "err", err)
-	}
+	t.sendText(ctx, b, update.Message.Chat.ID, pong)
 }
 
 func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update *models.Update) {
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) != 2 {
 		slog.Info("invalid arguments passed", "chatID", update.Message.Chat.ID, "message", update.Message.Text)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "To register enter /register followed by your registration code (ABCD-2234 or ABCD2234)",
-		})
-		if err != nil {
-			slog.Error("failed to send denial message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"To register, send /register followed by your invite code (e.g. /register ABCD-2234 or /register ABCD2234).")
 		return
 	}
 	regcode := strings.ToUpper(parts[1])
 	regcode = strings.ReplaceAll(regcode, "-", "")
 	if !inviteCodePattern.MatchString(regcode) {
 		slog.Info("failed to validate code", "chatID", update.Message.Chat.ID, "code", regcode)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "I could not validate your registration code.",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"That invite code doesn't look right. Codes are 8 letters and digits, e.g. ABCD-2234.")
 		return
 	}
 	slog.Info("got valid registration code request, checking db", "chatID", update.Message.Chat.ID, "code", regcode)
@@ -226,24 +231,13 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 	}
 	if err != nil {
 		slog.Error("failed to redeem invite code", "chatID", update.Message.Chat.ID, "code", regcode, "err", err)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "I experienced a temporary error during registration, try again later.",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
 		return
 	}
 	if rows != 1 {
 		slog.Info("invalid or used code provided", "chatID", update.Message.Chat.ID, "code", regcode)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "This registration code either doesn't exist or has been redeemed already.",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"That invite code doesn't exist or has already been redeemed.")
 		return
 	}
 	// chain only builds a handler; call it to run. fetchUser reloads the
@@ -251,13 +245,8 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 	// before the welcome message goes out.
 	welcome := func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		slog.Info("registration successful", "chatID", update.Message.Chat.ID, "code", regcode)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "Welcome to runway! Now that you are registered, use /link to generate a plaid link code",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"Welcome to Runway! You're registered — use /link to connect your first bank account.")
 	}
 	chain(welcome, t.fetchUser, t.syncCommands)(ctx, b, update)
 }
@@ -268,13 +257,7 @@ func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *mode
 	userID, err := uuid.NewV7()
 	if err != nil {
 		slog.Error("failed to generate uuid", "chatID", invUser.TelegramID(), "err", err)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "I experienced a temporary error during Invite Generation, try again later.",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", invUser.TelegramID(), "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
 		return
 	}
 	err = t.store.CreateInviteCode(ctx, sqlcgen.CreateInviteCodeParams{
@@ -283,43 +266,28 @@ func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *mode
 	})
 	if err != nil {
 		slog.Error("failed to insert invite", "chatID", invUser.TelegramID(), "err", err)
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "I experienced a temporary error during Invite Generation, try again later.",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", invUser.TelegramID(), "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
 		return
 	}
 	slog.Info("invite created", "chatID", invUser.TelegramID())
-	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("Invite created! Share this code, %s, with the invitee, and have them register using /register", inviteCode),
-	})
-	if err != nil {
-		slog.Error("failed to send message", "chatID", invUser.TelegramID(), "err", err)
-	}
+	// Hyphenate for readability; /register strips the dash before matching.
+	displayCode := inviteCode[:4] + "-" + inviteCode[4:]
+	t.sendText(ctx, b, update.Message.Chat.ID,
+		fmt.Sprintf("Invite created! Share this invite code with the invitee: %s\nThey can redeem it by sending me /register %s", displayCode, displayCode))
 }
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
 	user := UserFromContext(ctx)
 	if user == nil {
 		slog.Error("something happened where a user was allowed to /link without proper context")
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "I experienced a temporary error during link, try again later.",
-		})
-		if err != nil {
-			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
-		}
+		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
 		return
 	}
 	token := RandomToken(16, Base64)
 	t.store.TGTokens.Set(token, *user, t.tokenTTL)
 	params := url.Values{}
 	params.Set("token", token)
-	linkURL := "https://gpws.kawaiide.su/link?" + params.Encode()
+	linkURL := t.baseURL + "/link?" + params.Encode()
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: update.Message.Chat.ID,
 		Text:   formatLinkMessage(t.tokenTTL),
@@ -425,16 +393,16 @@ func (t *TelegramBot) handleMortize(ctx context.Context, b *bot.Bot, update *mod
 // permissions. Unregistered (nil) and inactive users get ping and register.
 func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *domains.User) error {
 	cmds := []models.BotCommand{
-		{Command: "ping", Description: "Ping Runway Service"},
-		{Command: "register", Description: "Register with Runway using a shared token"},
+		{Command: "ping", Description: "Check that Runway is up"},
+		{Command: "register", Description: "Register with an invite code"},
 	}
 	if user.Has(domains.PermissionActive) {
 		cmds = []models.BotCommand{
-			{Command: "ping", Description: "Ping Runway Service"},
-			{Command: "link", Description: "Link account"},
+			{Command: "ping", Description: "Check that Runway is up"},
+			{Command: "link", Description: "Link a bank account"},
 		}
 		if user.Has(domains.PermissionInvite) {
-			cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Invite a user to runway"})
+			cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Create an invite code for a new user"})
 		}
 	}
 	// BotCommandScopeChatMember only applies to group chats; in a private

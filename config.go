@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/hex"
 	"log/slog"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -14,71 +16,97 @@ import (
 const maxPlaidTimeout = 300 * time.Second
 
 type Config struct {
-	DBPath            string            `envconfig:"DB_PATH" default:"./data/runway.db"`
-	DBCryptKey        []byte            `envconfig:"-"`
-	DBCryptKeyHex     string            `envconfig:"DB_CRYPT_KEY"`
-	ListenAddress     string            `envconfig:"LISTEN_ADDRESS" default:"localhost:1996"`
-	TGBotKey          string            `envconfig:"TG_BOT_KEY"`
-	TGChatId          int64             `envconfig:"TG_CHAT_ID"`
-	Production        bool              `envconfig:"PRODUCTION" default:"false"`
+	DBPath        string `envconfig:"DB_PATH" default:"./data/runway.db"`
+	DBCryptKey    []byte `envconfig:"-"`
+	DBCryptKeyHex string `envconfig:"DB_CRYPT_KEY"`
+	ListenAddress string `envconfig:"LISTEN_ADDRESS" default:"localhost:1996"`
+	TGBotKey      string `envconfig:"TG_BOT_KEY"`
+	// BaseURL is the public origin this service is reachable at; the /link
+	// URL and the default Plaid webhook URL are derived from it.
+	BaseURL           string            `envconfig:"BASE_URL" default:"https://gpws.kawaiide.su"`
 	PlaidClientID     string            `envconfig:"PLAID_CLIENT_ID"`
 	PlaidSecret       string            `envconfig:"PLAID_SECRET"`
-	SignalRulesetKey  string            `envconfig:"SIGNAL_RULESET_KEY"`
 	PlaidEnv          plaid.Environment `envconfig:"-"`
 	PlaidTimeout      time.Duration     `envconfig:"PLAID_TIMEOUT" default:"30s"`
 	PlaidEnvName      string            `envconfig:"PLAID_ENV" default:"sandbox"`
-	PlaidProducts     string            `envconfig:"PLAID_PRODUCTS" default:"auth,transactions,signal"`
-	PlaidCountryCodes string            `envconfig:"PLAID_COUNTRY_CODES" default:"US,CA"`
-	PlaidRedirectURI  string            `envconfig:"PLAID_REDIRECT_URI"`
-	PlaidWebhookURL   string            `envconfig:"PLAID_WEBHOOK_URL" default:"https://gpws.kawaiide.su/hook/plaid"`
+	PlaidProducts     string            `envconfig:"PLAID_PRODUCTS" default:"transactions"`
+	PlaidCountryCodes string            `envconfig:"PLAID_COUNTRY_CODES" default:"US"`
+	PlaidWebhookURL   string            `envconfig:"PLAID_WEBHOOK_URL"`
 	TokenTTL          time.Duration     `envconfig:"TOKEN_TTL" default:"30m"`
+
+	// Parsed from PlaidProducts / PlaidCountryCodes; used when creating link tokens.
+	PlaidProductList     []plaid.Products    `envconfig:"-"`
+	PlaidCountryCodeList []plaid.CountryCode `envconfig:"-"`
 }
 
-var Env Config
-
 func LoadSettings() *Config {
+	var cfg Config
 	if err := godotenv.Load(); err != nil {
 		slog.Warn(".env file not found, using system environment variables instead")
 	}
-	if err := envconfig.Process("runway", &Env); err != nil {
+	if err := envconfig.Process("runway", &cfg); err != nil {
 		slog.Error("Failed to load environment configuration", "error", err)
 		os.Exit(1)
 	}
-	if Env.DBCryptKeyHex == "" {
+	if cfg.DBCryptKeyHex == "" {
 		slog.Error("DB_CRYPT_KEY must be set in environment variables")
 		os.Exit(1)
 	}
-	if len(Env.DBCryptKeyHex) != 64 {
+	if len(cfg.DBCryptKeyHex) != 64 {
 		slog.Error("DB_CRYPT_KEY must be 32 bytes long (64 hex characters)")
 		os.Exit(1)
 	}
-	if Env.PlaidTimeout <= 0 {
+	if cfg.PlaidTimeout <= 0 {
 		slog.Error("PLAID_TIMEOUT must be a positive duration")
 		os.Exit(1)
 	}
-	if Env.PlaidTimeout > maxPlaidTimeout {
+	if cfg.PlaidTimeout > maxPlaidTimeout {
 		slog.Error("PLAID_TIMEOUT must not exceed 300 seconds")
 		os.Exit(1)
 	}
-	if Env.TokenTTL < time.Minute {
+	if cfg.TokenTTL < time.Minute {
 		slog.Error("TOKEN_TTL must be at least one minute")
 		os.Exit(1)
 	}
-	switch Env.PlaidEnvName {
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	if u, err := url.Parse(cfg.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
+		slog.Error("BASE_URL must be an absolute URL", "value", cfg.BaseURL)
+		os.Exit(1)
+	}
+	if cfg.PlaidWebhookURL == "" {
+		cfg.PlaidWebhookURL = cfg.BaseURL + "/hook/plaid"
+	}
+	for _, p := range strings.Split(cfg.PlaidProducts, ",") {
+		product, err := plaid.NewProductsFromValue(strings.ToLower(strings.TrimSpace(p)))
+		if err != nil {
+			slog.Error("Invalid PLAID_PRODUCTS value", "value", p, "error", err)
+			os.Exit(1)
+		}
+		cfg.PlaidProductList = append(cfg.PlaidProductList, *product)
+	}
+	for _, c := range strings.Split(cfg.PlaidCountryCodes, ",") {
+		country, err := plaid.NewCountryCodeFromValue(strings.ToUpper(strings.TrimSpace(c)))
+		if err != nil {
+			slog.Error("Invalid PLAID_COUNTRY_CODES value", "value", c, "error", err)
+			os.Exit(1)
+		}
+		cfg.PlaidCountryCodeList = append(cfg.PlaidCountryCodeList, *country)
+	}
+	switch cfg.PlaidEnvName {
 	case "sandbox":
-		Env.PlaidEnv = plaid.Sandbox
+		cfg.PlaidEnv = plaid.Sandbox
 	case "production":
-		Env.PlaidEnv = plaid.Production
+		cfg.PlaidEnv = plaid.Production
 	default:
-		slog.Error("Invalid PLAID_ENV value", "value", Env.PlaidEnvName)
+		slog.Error("Invalid PLAID_ENV value", "value", cfg.PlaidEnvName)
 		os.Exit(1)
 	}
 	var err error
-	Env.DBCryptKey, err = hex.DecodeString(Env.DBCryptKeyHex)
-	Env.DBCryptKeyHex = "" // Clear the hex string from memory for security
+	cfg.DBCryptKey, err = hex.DecodeString(cfg.DBCryptKeyHex)
+	cfg.DBCryptKeyHex = "" // Clear the hex string from memory for security
 	if err != nil {
 		slog.Error("Failed to decode DB_CRYPT_KEY", "error", err)
 		os.Exit(1)
 	}
-	return &Env
+	return &cfg
 }

@@ -90,8 +90,10 @@ func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg
 		// request, and inFlightSyncs dedupes bursts of webhooks per item.
 		usql, err := store.GetUserByID(r.Context(), item.UserID)
 		if errors.Is(err, sql.ErrNoRows) {
+			// Permanent state — a non-2xx would just make Plaid retry a
+			// webhook we can never act on.
 			slog.Info("user not located in database", "ID", item.UserID)
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(http.StatusOK)
 			return
 		} else if err != nil {
 			slog.Error("failed to query database for user", "ID", item.UserID, "err", err)

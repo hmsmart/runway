@@ -14,6 +14,11 @@ ON CONFLICT(account_id) DO UPDATE SET
   balance_available = excluded.balance_available,
   balance_current = excluded.balance_current,
   iso_currency_code = excluded.iso_currency_code,
-  last_synced_at = excluded.last_synced_at,
+  last_synced_at = COALESCE(excluded.last_synced_at, accounts.last_synced_at),
   raw_json = excluded.raw_json
-WHERE excluded.last_synced_at > accounts.last_synced_at OR accounts.last_synced_at IS NULL
+-- Skip only when the incoming snapshot is provably older. Plaid omits
+-- last_updated_datetime for many institutions, so a NULL timestamp still
+-- means freshly fetched data and must not freeze the row.
+WHERE excluded.last_synced_at IS NULL
+   OR accounts.last_synced_at IS NULL
+   OR excluded.last_synced_at > accounts.last_synced_at
