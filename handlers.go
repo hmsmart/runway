@@ -34,7 +34,7 @@ func handleHealthz(store *database.Store) http.HandlerFunc {
 		w.Write([]byte("ok"))
 	}
 }
-func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) http.HandlerFunc {
+func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, tg *TelegramBot) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		slog.Info("unwrapping pubtoken exchange request", "for", ip)
@@ -104,11 +104,22 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			return
 		}
 		slog.Info("successfully added new item to database", "for", ip)
-		// fire and forget the heavy stuff; persistCtx outlives the request
+		firstItem := false
+		if n, err := store.CountItemsByUser(persistCtx, tgUser.ID()); err != nil {
+			slog.Error("failed to count user items", "for", ip, "err", err)
+		} else {
+			firstItem = n == 1
+		}
+		chatID := tgUser.TelegramID()
+		institution := stringOr(StringPtrOk(item.GetInstitutionNameOk()), "your bank")
+		tg.sendLinkedMessage(persistCtx, chatID, institution, firstItem)
+		// fire and forget the heavy stuff; persistCtx outlives the request.
+		// The drain worker announces the backfill itself, in order.
 		go func() {
-			if err := syncItem(persistCtx, item.ItemId, accessToken, nil, plaidClient, store, cfg, notify); err != nil {
+			if err := syncItem(persistCtx, item.ItemId, accessToken, nil, plaidClient, store, cfg); err != nil {
 				slog.Error("post-link sync failed", "item", item.ItemId, "err", err)
 			}
+			tg.startDrain(chatID)
 		}()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("linked"))

@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+const countItemsByUser = `-- name: CountItemsByUser :one
+SELECT COUNT(*) FROM items WHERE user_id = ? AND status = 'active'
+`
+
+func (q *Queries) CountItemsByUser(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countItemsByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createItem = `-- name: CreateItem :exec
 INSERT INTO items (
     item_id,
@@ -42,6 +53,15 @@ func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) error {
 		arg.InstitutionName,
 		arg.Status,
 	)
+	return err
+}
+
+const deleteItem = `-- name: DeleteItem :exec
+DELETE FROM items WHERE item_id = ?
+`
+
+func (q *Queries) DeleteItem(ctx context.Context, itemID string) error {
+	_, err := q.db.ExecContext(ctx, deleteItem, itemID)
 	return err
 }
 
@@ -99,6 +119,43 @@ func (q *Queries) GetItemByID(ctx context.Context, itemID string) (Item, error) 
 		&i.UserID,
 	)
 	return i, err
+}
+
+const listItemsByUser = `-- name: ListItemsByUser :many
+SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at, user_id FROM items WHERE user_id = ? AND status = 'active' ORDER BY created_at ASC, item_id ASC
+`
+
+// Stable order so /links indices stay consistent between list and unlink.
+func (q *Queries) ListItemsByUser(ctx context.Context, userID string) ([]Item, error) {
+	rows, err := q.db.QueryContext(ctx, listItemsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Item{}
+	for rows.Next() {
+		var i Item
+		if err := rows.Scan(
+			&i.ItemID,
+			&i.AccessToken,
+			&i.InstitutionName,
+			&i.Status,
+			&i.Cursor,
+			&i.CreatedAt,
+			&i.LastSyncedAt,
+			&i.UserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateItemCursor = `-- name: UpdateItemCursor :exec

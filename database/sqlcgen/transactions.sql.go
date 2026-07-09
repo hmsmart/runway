@@ -18,8 +18,93 @@ func (q *Queries) ClearAmortEnd(ctx context.Context, txID string) error {
 	return err
 }
 
+const countPendingNotifications = `-- name: CountPendingNotifications :one
+SELECT COUNT(*) FROM transactions
+JOIN accounts ON accounts.account_id = transactions.account_id
+JOIN items ON items.item_id = accounts.item_id
+JOIN users ON users.id = items.user_id
+WHERE users.tg_id = ? AND transactions.notified = 0 AND transactions.removed_at IS NULL
+  AND transactions.amount >= 0 AND transactions.date >= CAST(?2 AS TEXT)
+`
+
+type CountPendingNotificationsParams struct {
+	TgID   *int64 `json:"tg_id"`
+	Cutoff string `json:"cutoff"`
+}
+
+func (q *Queries) CountPendingNotifications(ctx context.Context, arg CountPendingNotificationsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPendingNotifications, arg.TgID, arg.Cutoff)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const deleteTransactionsByItem = `-- name: DeleteTransactionsByItem :exec
+DELETE FROM transactions WHERE account_id IN (SELECT account_id FROM accounts WHERE item_id = ?)
+`
+
+func (q *Queries) DeleteTransactionsByItem(ctx context.Context, itemID string) error {
+	_, err := q.db.ExecContext(ctx, deleteTransactionsByItem, itemID)
+	return err
+}
+
+const getPendingNotifications = `-- name: GetPendingNotifications :many
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified FROM transactions
+JOIN accounts ON accounts.account_id = transactions.account_id
+JOIN items ON items.item_id = accounts.item_id
+JOIN users ON users.id = items.user_id
+WHERE users.tg_id = ? AND transactions.notified = 0 AND transactions.removed_at IS NULL
+ORDER BY transactions.date ASC, transactions.tx_id ASC
+LIMIT 50
+`
+
+type GetPendingNotificationsRow struct {
+	Transaction Transaction `json:"transaction"`
+}
+
+func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]GetPendingNotificationsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getPendingNotifications, tgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetPendingNotificationsRow{}
+	for rows.Next() {
+		var i GetPendingNotificationsRow
+		if err := rows.Scan(
+			&i.Transaction.TxID,
+			&i.Transaction.PlaidTxID,
+			&i.Transaction.AccountID,
+			&i.Transaction.Date,
+			&i.Transaction.Amount,
+			&i.Transaction.Name,
+			&i.Transaction.MerchantName,
+			&i.Transaction.CategoryPrimary,
+			&i.Transaction.CategoryDetailed,
+			&i.Transaction.CategoryConfidence,
+			&i.Transaction.PaymentChannel,
+			&i.Transaction.Pending,
+			&i.Transaction.RemovedAt,
+			&i.Transaction.AmortEnd,
+			&i.Transaction.Excluded,
+			&i.Transaction.RawJson,
+			&i.Transaction.Notified,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTransaction = `-- name: GetTransaction :one
-SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json FROM transactions WHERE tx_id = ?
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified FROM transactions WHERE tx_id = ?
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
@@ -42,8 +127,62 @@ func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction,
 		&i.AmortEnd,
 		&i.Excluded,
 		&i.RawJson,
+		&i.Notified,
 	)
 	return i, err
+}
+
+const listChatsWithPendingNotifications = `-- name: ListChatsWithPendingNotifications :many
+SELECT DISTINCT users.tg_id FROM transactions
+JOIN accounts ON accounts.account_id = transactions.account_id
+JOIN items ON items.item_id = accounts.item_id
+JOIN users ON users.id = items.user_id
+WHERE users.tg_id IS NOT NULL AND transactions.notified = 0 AND transactions.removed_at IS NULL
+`
+
+func (q *Queries) ListChatsWithPendingNotifications(ctx context.Context) ([]*int64, error) {
+	rows, err := q.db.QueryContext(ctx, listChatsWithPendingNotifications)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*int64{}
+	for rows.Next() {
+		var tg_id *int64
+		if err := rows.Scan(&tg_id); err != nil {
+			return nil, err
+		}
+		items = append(items, tg_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markTransactionNotified = `-- name: MarkTransactionNotified :exec
+UPDATE transactions SET notified = 1 WHERE tx_id = ?
+`
+
+func (q *Queries) MarkTransactionNotified(ctx context.Context, txID string) error {
+	_, err := q.db.ExecContext(ctx, markTransactionNotified, txID)
+	return err
+}
+
+const markUnnotifiableTransactions = `-- name: MarkUnnotifiableTransactions :exec
+UPDATE transactions SET notified = 1
+WHERE notified = 0
+  AND (amount < 0 OR removed_at IS NOT NULL OR date < CAST(?1 AS TEXT))
+`
+
+// Retire pending rows that will never be announced: credits, soft-deleted
+// rows, and anything older than the notify window (cutoff is YYYY-MM-DD).
+func (q *Queries) MarkUnnotifiableTransactions(ctx context.Context, cutoff string) error {
+	_, err := q.db.ExecContext(ctx, markUnnotifiableTransactions, cutoff)
+	return err
 }
 
 const setAmortEnd = `-- name: SetAmortEnd :exec
@@ -87,10 +226,10 @@ func (q *Queries) SoftDeleteTransaction(ctx context.Context, plaidTxID string) e
 const upsertTransaction = `-- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, amount,
-    name, merchant_name, category_primary, category_detailed, category_confidence, 
-    payment_channel, pending, raw_json
+    name, merchant_name, category_primary, category_detailed, category_confidence,
+    payment_channel, pending, raw_json, notified
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     amount = excluded.amount,
@@ -120,6 +259,7 @@ type UpsertTransactionParams struct {
 	PaymentChannel     string  `json:"payment_channel"`
 	Pending            int64   `json:"pending"`
 	RawJson            *string `json:"raw_json"`
+	Notified           int64   `json:"notified"`
 }
 
 func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) (string, error) {
@@ -137,6 +277,7 @@ func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionPa
 		arg.PaymentChannel,
 		arg.Pending,
 		arg.RawJson,
+		arg.Notified,
 	)
 	var tx_id string
 	err := row.Scan(&tx_id)

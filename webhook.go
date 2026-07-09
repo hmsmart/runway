@@ -36,7 +36,7 @@ func webhookPath(rawURL string) string {
 	return u.Path
 }
 
-func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) http.HandlerFunc {
+func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, tg *TelegramBot) http.HandlerFunc {
 	verifier := newPlaidWebhookVerifier(plaidClient)
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -101,11 +101,14 @@ func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg
 			return
 		}
 		u := domains.NewUser(usql)
-		syncCtx := WithUser(r.Context(), u)
-		syncCtx = context.WithoutCancel(syncCtx)
+		syncCtx := context.WithoutCancel(r.Context())
 		go func() {
-			if err := syncItem(syncCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
+			if err := syncItem(syncCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg); err != nil {
 				slog.Error("webhook-triggered sync failed", "item", item.ItemID, "err", err)
+			}
+			// Kick even after a failed sync: earlier pages may have committed.
+			if u != nil {
+				tg.startDrain(u.TelegramID())
 			}
 		}()
 		w.WriteHeader(http.StatusOK)

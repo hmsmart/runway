@@ -2,6 +2,10 @@
 SELECT * FROM accounts WHERE account_id = ? AND item_id = ?;
 -- name: GetAllAccounts :many
 SELECT * FROM accounts WHERE tracked = 1 ORDER BY created_at DESC;
+-- name: ListAccountsByItem :many
+SELECT * FROM accounts WHERE item_id = ? ORDER BY name ASC;
+-- name: DeleteAccountsByItem :exec
+DELETE FROM accounts WHERE item_id = ?;
 -- name: UpsertAccount :exec
 INSERT INTO accounts (account_id, item_id, name, mask, type, subtype, balance_available, balance_current, iso_currency_code, tracked, last_synced_at, raw_json)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

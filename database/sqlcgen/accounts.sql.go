@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+const deleteAccountsByItem = `-- name: DeleteAccountsByItem :exec
+DELETE FROM accounts WHERE item_id = ?
+`
+
+func (q *Queries) DeleteAccountsByItem(ctx context.Context, itemID string) error {
+	_, err := q.db.ExecContext(ctx, deleteAccountsByItem, itemID)
+	return err
+}
+
 const getAccountById = `-- name: GetAccountById :one
 SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_currency_code, type, subtype, raw_json, created_at, last_synced_at, tracked FROM accounts WHERE account_id = ? AND item_id = ?
 `
@@ -46,6 +55,47 @@ SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_
 
 func (q *Queries) GetAllAccounts(ctx context.Context) ([]Account, error) {
 	rows, err := q.db.QueryContext(ctx, getAllAccounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Account{}
+	for rows.Next() {
+		var i Account
+		if err := rows.Scan(
+			&i.AccountID,
+			&i.ItemID,
+			&i.Name,
+			&i.Mask,
+			&i.BalanceAvailable,
+			&i.BalanceCurrent,
+			&i.IsoCurrencyCode,
+			&i.Type,
+			&i.Subtype,
+			&i.RawJson,
+			&i.CreatedAt,
+			&i.LastSyncedAt,
+			&i.Tracked,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAccountsByItem = `-- name: ListAccountsByItem :many
+SELECT account_id, item_id, name, mask, balance_available, balance_current, iso_currency_code, type, subtype, raw_json, created_at, last_synced_at, tracked FROM accounts WHERE item_id = ? ORDER BY name ASC
+`
+
+func (q *Queries) ListAccountsByItem(ctx context.Context, itemID string) ([]Account, error) {
+	rows, err := q.db.QueryContext(ctx, listAccountsByItem, itemID)
 	if err != nil {
 		return nil, err
 	}

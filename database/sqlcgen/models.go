@@ -61,6 +61,7 @@ type Transaction struct {
 	AmortEnd           *string `json:"amort_end"`
 	Excluded           int64   `json:"excluded"`
 	RawJson            *string `json:"raw_json"`
+	Notified           int64   `json:"notified"`
 }
 
 type User struct {

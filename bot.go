@@ -8,9 +8,11 @@ import (
 	"html"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -19,25 +21,44 @@ import (
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/hmsmart/runway/domains"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 // inviteCodePattern matches a normalized invite code: 8 base32 characters,
 // uppercased with dashes stripped.
 var inviteCodePattern = regexp.MustCompile(`^[A-Z2-7]{8}$`)
 
+// Notification policy: transactions older than the window are never
+// announced; within the window, anything older than the fresh cutoff is
+// delivered silently (no sound/banner) so backfills don't melt phones.
+// Sends are paced 1–3s apart per chat, under Telegram's 1 msg/sec limit.
+const (
+	notifyWindowDays  = 30
+	freshCutoffDays   = 3
+	minNotifyPause    = time.Second
+	notifyPauseJitter = 2 * time.Second
+	avgNotifyPause    = minNotifyPause + notifyPauseJitter/2 // for ETA copy
+)
+
 type TelegramBot struct {
-	bot      *bot.Bot
-	baseURL  string
-	store    *database.Store
-	tokenTTL time.Duration
+	bot   *bot.Bot
+	cfg   *Config
+	store *database.Store
+	plaid *plaid.APIClient
+	// runCtx bounds the background drain workers; it should be the app's
+	// run context so workers stop on shutdown.
+	runCtx context.Context
+	// drains maps chat ID -> kick channel (buffered, size 1) for that
+	// chat's drain worker. Workers spawn lazily and park forever.
+	drains sync.Map
 }
 
-func NewTelegramBot(token string, baseURL string, store *database.Store, tokenTTL time.Duration) (*TelegramBot, error) {
-	b, err := bot.New(token)
+func NewTelegramBot(ctx context.Context, cfg *Config, store *database.Store, plaidClient *plaid.APIClient) (*TelegramBot, error) {
+	b, err := bot.New(cfg.TGBotKey)
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
-	return &TelegramBot{bot: b, baseURL: baseURL, store: store, tokenTTL: tokenTTL}, nil
+	return &TelegramBot{bot: b, cfg: cfg, store: store, plaid: plaidClient, runCtx: ctx}, nil
 }
 
 // middleware wraps a handler with one cross-cutting step.
@@ -163,6 +184,12 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handlePing, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/links", bot.MatchTypeExact,
+		chain(t.handleLinks, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unlink", bot.MatchTypePrefix,
+		chain(t.handleUnlink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unregister", bot.MatchTypeExact,
+		chain(t.handleUnregister, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/invite", bot.MatchTypeExact,
 		chain(t.handleInvite, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionInvite)))
 
@@ -179,6 +206,10 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleAmortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "mortize:", bot.MatchTypePrefix,
 		chain(t.handleMortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "unlink:", bot.MatchTypePrefix,
+		chain(t.handleUnlinkCallback, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "unreg:", bot.MatchTypePrefix,
+		chain(t.handleUnregisterCallback, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 }
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -284,13 +315,13 @@ func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models
 		return
 	}
 	token := RandomToken(16, Base64)
-	t.store.TGTokens.Set(token, *user, t.tokenTTL)
+	t.store.TGTokens.Set(token, *user, t.cfg.TokenTTL)
 	params := url.Values{}
 	params.Set("token", token)
-	linkURL := t.baseURL + "/link?" + params.Encode()
+	linkURL := t.cfg.BaseURL + "/link?" + params.Encode()
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: update.Message.Chat.ID,
-		Text:   formatLinkMessage(t.tokenTTL),
+		Text:   formatLinkMessage(t.cfg.TokenTTL),
 		ReplyMarkup: &models.InlineKeyboardMarkup{
 			InlineKeyboard: [][]models.InlineKeyboardButton{{
 				{Text: "🔗 Link Account", URL: linkURL},
@@ -400,10 +431,13 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 		cmds = []models.BotCommand{
 			{Command: "ping", Description: "Check that Runway is up"},
 			{Command: "link", Description: "Link a bank account"},
+			{Command: "links", Description: "List your linked accounts"},
+			{Command: "unlink", Description: "Unlink an account by number"},
 		}
 		if user.Has(domains.PermissionInvite) {
 			cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Create an invite code for a new user"})
 		}
+		cmds = append(cmds, models.BotCommand{Command: "unregister", Description: "Delete your data and leave Runway"})
 	}
 	// BotCommandScopeChatMember only applies to group chats; in a private
 	// chat the chat is the user, so chat scope gives a per-user menu.
@@ -467,27 +501,108 @@ func (t *TelegramBot) answerCallback(ctx context.Context, b *bot.Bot, update *mo
 	}
 }
 
-// NotifyTransaction announces a newly synced transaction to the configured
-// chat. Positive amounts are money out (Plaid's convention); credits are
-// skipped.
-func (t *TelegramBot) NotifyTransaction(ctx context.Context, tx sqlcgen.UpsertTransactionParams) {
-	user := UserFromContext(ctx)
-	if user == nil {
-		slog.Info("transaction not associated with user", "id", tx.TxID, "plaidTx", tx.PlaidTxID, "amt", tx.Amount)
-		return
+// startDrain ensures a drain worker exists for chatID and kicks it. Safe to
+// call from any goroutine, any number of times: kicks carry no payload, so
+// while the worker is busy a single buffered kick stands in for any burst,
+// and the worker re-queries before parking so no rows are ever stranded.
+func (t *TelegramBot) startDrain(chatID int64) {
+	kick, loaded := t.drains.LoadOrStore(chatID, make(chan struct{}, 1))
+	ch := kick.(chan struct{})
+	if !loaded {
+		go t.drainWorker(chatID, ch)
 	}
-	if tx.Amount < 0 {
-		return
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
-	slog.Info("new transaction", "chatID", user.TelegramID(), "id", tx.TxID, "plaidTx", tx.PlaidTxID, "amt", tx.Amount)
+}
+
+func (t *TelegramBot) drainWorker(chatID int64, kick chan struct{}) {
+	for range kick {
+		t.drainChat(t.runCtx, chatID)
+	}
+}
+
+// drainChat announces this chat's unsent transactions oldest-first, marking
+// each row as it goes, and returns once the pending queue is empty. It
+// re-queries between batches so rows inserted mid-drain join in date order.
+func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
+	announced := false
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		windowCutoff := time.Now().AddDate(0, 0, -notifyWindowDays).Format(time.DateOnly)
+		if err := t.store.MarkUnnotifiableTransactions(ctx, windowCutoff); err != nil {
+			slog.Error("failed to retire unnotifiable transactions", "chatID", chatID, "err", err)
+			return
+		}
+		rows, err := t.store.GetPendingNotifications(ctx, &chatID)
+		if err != nil {
+			slog.Error("failed to load pending notifications", "chatID", chatID, "err", err)
+			return
+		}
+		if len(rows) == 0 {
+			return
+		}
+		if !announced {
+			announced = true
+			t.announceBackfill(ctx, chatID, windowCutoff)
+		}
+		freshCutoff := time.Now().AddDate(0, 0, -freshCutoffDays).Format(time.DateOnly)
+		for _, row := range rows {
+			tx := row.Transaction
+			// Plaid dates are YYYY-MM-DD, so string comparison is date order.
+			silent := tx.Date < freshCutoff
+			if err := t.sendTransactionNotification(ctx, chatID, tx, silent); err != nil {
+				var tooMany *bot.TooManyRequestsError
+				if errors.As(err, &tooMany) {
+					// Rate limited: the row stays pending; wait as told and
+					// restart the pass so it retries in order.
+					if !sleepCtx(ctx, time.Duration(tooMany.RetryAfter)*time.Second) {
+						return
+					}
+					break
+				}
+				// Anything else is treated as permanent (blocked bot, bad
+				// chat): log and mark below so one row can't wedge the queue.
+				slog.Error("failed to send transaction notification", "chatID", chatID, "tx", tx.TxID, "err", err)
+			}
+			if err := t.store.MarkTransactionNotified(ctx, tx.TxID); err != nil {
+				slog.Error("failed to mark transaction notified", "tx", tx.TxID, "err", err)
+				return
+			}
+			if !sleepCtx(ctx, notifyPause()) {
+				return
+			}
+		}
+	}
+}
+
+func (t *TelegramBot) sendTransactionNotification(ctx context.Context, chatID int64, tx sqlcgen.Transaction, silent bool) error {
+	slog.Info("announcing transaction", "chatID", chatID, "tx", tx.TxID, "amt", tx.Amount, "silent", silent)
 	_, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      user.TelegramID(),
-		Text:        formatTransactionMessage(transactionFromParams(tx)),
-		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: transactionKeyboard(tx.TxID, false),
+		ChatID:              chatID,
+		Text:                formatTransactionMessage(tx),
+		ParseMode:           models.ParseModeHTML,
+		ReplyMarkup:         transactionKeyboard(tx.TxID, tx.Excluded == 1),
+		DisableNotification: silent,
 	})
-	if err != nil {
-		slog.Error("failed to send transaction notification", "chatID", user.TelegramID(), "tx", tx.TxID, "err", err)
+	return err
+}
+
+// notifyPause returns the jittered per-message send delay.
+func notifyPause() time.Duration {
+	return minNotifyPause + rand.N(notifyPauseJitter)
+}
+
+// sleepCtx pauses for d, returning false if ctx ends first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -535,24 +650,70 @@ func amortizeKeyboard(txID string, amortized bool) models.InlineKeyboardMarkup {
 	}
 }
 
-// transactionFromParams adapts freshly upserted params to the row model so
-// notifications and post-action refreshes share one message formatter. New
-// rows have no amortization/exclusion state yet, so those default to unset.
-func transactionFromParams(p sqlcgen.UpsertTransactionParams) sqlcgen.Transaction {
-	return sqlcgen.Transaction{
-		TxID:             p.TxID,
-		PlaidTxID:        p.PlaidTxID,
-		AccountID:        p.AccountID,
-		Date:             p.Date,
-		Amount:           p.Amount,
-		Name:             p.Name,
-		MerchantName:     p.MerchantName,
-		CategoryPrimary:  p.CategoryPrimary,
-		CategoryDetailed: p.CategoryDetailed,
-		PaymentChannel:   p.PaymentChannel,
-		Pending:          p.Pending,
-		RawJson:          p.RawJson,
+// sendLinkedMessage confirms a successful account link. The first-ever item
+// gets the full onboarding explainer, including the auto-delete tip (bots
+// can't set a chat's auto-delete timer, so the user has to).
+func (t *TelegramBot) sendLinkedMessage(ctx context.Context, chatID int64, institution string, firstItem bool) {
+	inst := html.EscapeString(institution)
+	text := fmt.Sprintf("🏦 Linked <b>%s</b>! I'll post its new transactions here as they come in.", inst)
+	if firstItem {
+		text = fmt.Sprintf(
+			"🏦 Thanks for linking <b>%s</b>!\n\n"+
+				"I'm collecting your last %d days of transactions now and will place them "+
+				"in this chat slowly and silently, so you can classify them at your convenience.\n\n"+
+				"💡 Tip: set this chat's auto-delete to 1 month (chat menu → Auto-Delete) to keep the clutter down.",
+			inst, notifyWindowDays)
 	}
+	_, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		slog.Error("failed to send linked message", "chatID", chatID, "err", err)
+	}
+}
+
+// announceThreshold is the pending count at which a drain pass introduces
+// itself before sending. Day-to-day webhook activity stays under it, so only
+// genuine backfills (new account, long downtime) get a header message.
+const announceThreshold = 10
+
+// announceBackfill precedes a large drain with a count/ETA message. It is
+// sent by the drain worker itself, so it always lands directly above the
+// transactions it describes, whichever trigger kicked the drain. Sent
+// silently: the backfill it heralds is silent too.
+func (t *TelegramBot) announceBackfill(ctx context.Context, chatID int64, cutoff string) {
+	count, err := t.store.CountPendingNotifications(ctx, sqlcgen.CountPendingNotificationsParams{
+		TgID:   &chatID,
+		Cutoff: cutoff,
+	})
+	if err != nil {
+		slog.Error("failed to count pending notifications", "chatID", chatID, "err", err)
+		return
+	}
+	if count < announceThreshold {
+		return
+	}
+	_, err = t.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text: fmt.Sprintf(
+			"📥 %d transactions queued from the last %d days — they'll trickle in silently over %s.",
+			count, notifyWindowDays, drainETA(count)),
+		DisableNotification: true,
+	})
+	if err != nil {
+		slog.Error("failed to send backfill announcement", "chatID", chatID, "err", err)
+	}
+}
+
+// drainETA renders the expected drain duration for user-facing text.
+func drainETA(count int64) string {
+	minutes := int((time.Duration(count)*avgNotifyPause + time.Minute/2) / time.Minute)
+	if minutes < 2 {
+		return "the next couple of minutes"
+	}
+	return fmt.Sprintf("about %d minutes", minutes)
 }
 
 func formatLinkMessage(ttl time.Duration) string {

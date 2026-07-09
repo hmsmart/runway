@@ -42,17 +42,6 @@ func run(ctx context.Context) error {
 	slog.Info("connected to database", "path", cfg.DBPath)
 	defer func() { _ = store.Close() }()
 
-	//Connect to Telegram
-
-	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.BaseURL, store, cfg.TokenTTL)
-	if err != nil {
-		return fmt.Errorf("starting telegram: %w", err)
-	}
-	notify := tg.NotifyTransaction
-	tg.RegisterHandlers()
-	go tg.bot.Start(ctx)
-	slog.Info("telegram setup")
-
 	// Initialize Plaid
 
 	plaidConfiguration := plaid.NewConfiguration()
@@ -62,12 +51,22 @@ func run(ctx context.Context) error {
 	plaidClient := plaid.NewAPIClient(plaidConfiguration)
 	slog.Info("Plaid initialized")
 
+	//Connect to Telegram
+
+	tg, err := NewTelegramBot(ctx, cfg, store, plaidClient)
+	if err != nil {
+		return fmt.Errorf("starting telegram: %w", err)
+	}
+	tg.RegisterHandlers()
+	go tg.bot.Start(ctx)
+	slog.Info("telegram setup")
+
 	//Start HTTP Server
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealthz(store))
 	mux.Handle("GET /link", handleLink(plaidClient, cfg, store))
-	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, notify))
-	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, notify))
+	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
+	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
 
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: mux}
 
@@ -81,6 +80,17 @@ func run(ctx context.Context) error {
 
 	slog.Info("program init synchronizing transactions")
 	go func() {
+		// Crash recovery first: drain anything queued before the last
+		// shutdown, even for items whose sync below fails.
+		chats, err := store.ListChatsWithPendingNotifications(ctx)
+		if err != nil {
+			slog.Error("failed to list chats with pending notifications", "err", err)
+		}
+		for _, chat := range chats {
+			if chat != nil {
+				tg.startDrain(*chat)
+			}
+		}
 		items, err := store.GetAllItems(ctx)
 		if err != nil {
 			slog.Error("failed to load items during startup synchronization", "err", err)
@@ -92,16 +102,16 @@ func run(ctx context.Context) error {
 				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)
 				continue
 			}
-			// Notifications resolve their target chat from the context
-			// user, so load the item's owner just like the webhook path.
+			if err := syncItem(ctx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg); err != nil {
+				slog.Error("startup sync failed", "item", item.ItemID, "err", err)
+			}
 			usql, err := store.GetUserByID(ctx, item.UserID)
 			if err != nil {
 				slog.Error("failed to load user for item", "item", item.ItemID, "user", item.UserID, "err", err)
 				continue
 			}
-			syncCtx := WithUser(ctx, domains.NewUser(usql))
-			if err := syncItem(syncCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
-				slog.Error("startup sync failed", "item", item.ItemID, "err", err)
+			if u := domains.NewUser(usql); u != nil {
+				tg.startDrain(u.TelegramID())
 			}
 		}
 	}()

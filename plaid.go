@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,8 +15,6 @@ import (
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
-type TransactionNotifier func(ctx context.Context, tx sqlcgen.UpsertTransactionParams)
-
 // inFlightSyncs prevents the same item from syncing concurrently, e.g. a
 // link request arriving while the startup sweep is still running.
 var inFlightSyncs sync.Map
@@ -23,7 +22,9 @@ var inFlightSyncs sync.Map
 // syncItem is the single entry point for all sync triggers: it refreshes the
 // item's accounts, then pulls transactions from the given cursor. Accounts go
 // first so transaction rows never hit a missing account_id foreign key.
-func syncItem(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) error {
+// Callers kick the owning chat's notification drain after this returns;
+// freshly inserted rows sit at notified = 0 until the drain sends them.
+func syncItem(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config) error {
 	if _, busy := inFlightSyncs.LoadOrStore(itemID, struct{}{}); busy {
 		slog.Info("sync already in progress, skipping", "item", itemID)
 		return nil
@@ -32,17 +33,26 @@ func syncItem(ctx context.Context, itemID string, accessToken string, cursor *st
 	if err := syncAllAccounts(ctx, itemID, accessToken, plaidClient, store, cfg); err != nil {
 		return fmt.Errorf("sync accounts: %w", err)
 	}
-	if err := syncTransactions(ctx, itemID, accessToken, cursor, plaidClient, store, cfg, notify); err != nil {
+	if err := syncTransactions(ctx, itemID, accessToken, cursor, plaidClient, store, cfg); err != nil {
 		return fmt.Errorf("sync transactions: %w", err)
 	}
 	return nil
 }
 
-func syncTransactions(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) error {
+func syncTransactions(ctx context.Context, itemID string, accessToken string, cursor *string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config) error {
+	// The 30-day backfill is a first-account-only courtesy: an initial pull
+	// (nil cursor) for any later item inserts its history already notified,
+	// so linking another bank never floods the chat. Deciding at insert time
+	// closes the race where a webhook kicks the drain mid-pull.
+	var notified int64
 	if cursor == nil {
-		// First sync for this item pulls the full history — don't announce
-		// hundreds of old transactions.
-		notify = nil
+		suppress, err := suppressBackfill(ctx, itemID, store)
+		if err != nil {
+			return err
+		}
+		if suppress {
+			notified = 1
+		}
 	}
 	var added, modified, removed int
 	for hasMore := true; hasMore; {
@@ -52,7 +62,7 @@ func syncTransactions(ctx context.Context, itemID string, accessToken string, cu
 			return err
 		}
 		nextCursor := resp.GetNextCursor()
-		if err := persistTransactionsPage(ctx, itemID, resp, nextCursor, store, cfg, notify); err != nil {
+		if err := persistTransactionsPage(ctx, itemID, resp, nextCursor, store, cfg, notified); err != nil {
 			slog.Error("failed to persist transactions", "cursor", cursorValue(cursor), "item", itemID, "err", err)
 			return err
 		}
@@ -79,32 +89,14 @@ func fetchTransactionsPage(ctx context.Context, accessToken string, cursor *stri
 
 // persistTransactionsPage writes one page of sync results and advances the
 // item's cursor in the same database transaction, so a crash mid-sync resumes
-// from the last completed page instead of re-downloading everything.
-// Notifications are collected during the transaction and sent only after it
-// commits, so Telegram I/O never holds the write lock and users are never
-// told about rows that rolled back.
-func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config, notify TransactionNotifier) error {
+// from the last completed page instead of re-downloading everything. Fresh
+// inserts land at notified = 0 for the drain worker; conflict updates leave
+// the flag alone so re-synced rows never re-announce.
+func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config, notified int64) error {
 	now := time.Now()
-	var toNotify []sqlcgen.UpsertTransactionParams
-	err := store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
-		for _, tx := range resp.GetAdded() {
-			params, err := transactionParams(tx, cfg)
-			if err != nil {
-				return err
-			}
-			storedID, err := q.UpsertTransaction(ctx, params)
-			if err != nil {
-				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
-			}
-			// The upsert returns the row's canonical tx_id; it only matches
-			// the one we generated when this was a fresh insert, so re-synced
-			// rows don't re-notify and callbacks always carry a real tx_id.
-			if storedID == params.TxID {
-				toNotify = append(toNotify, params)
-			}
-		}
-		for _, tx := range resp.GetModified() {
-			params, err := transactionParams(tx, cfg)
+	return store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
+		for _, tx := range slices.Concat(resp.GetAdded(), resp.GetModified()) {
+			params, err := transactionParams(tx, cfg, notified)
 			if err != nil {
 				return err
 			}
@@ -123,18 +115,23 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 			ItemID:       itemID,
 		})
 	})
-	if err != nil {
-		return err
-	}
-	if notify != nil {
-		for _, params := range toNotify {
-			notify(ctx, params)
-		}
-	}
-	return nil
 }
 
-func transactionParams(tx plaid.Transaction, cfg *Config) (sqlcgen.UpsertTransactionParams, error) {
+// suppressBackfill reports whether an initial history pull for this item
+// should skip notifications: only the user's first account gets the backfill.
+func suppressBackfill(ctx context.Context, itemID string, store *database.Store) (bool, error) {
+	item, err := store.GetItemByID(ctx, itemID)
+	if err != nil {
+		return false, fmt.Errorf("load item for backfill check: %w", err)
+	}
+	n, err := store.CountItemsByUser(ctx, item.UserID)
+	if err != nil {
+		return false, fmt.Errorf("count user items for backfill check: %w", err)
+	}
+	return n > 1, nil
+}
+
+func transactionParams(tx plaid.Transaction, cfg *Config, notified int64) (sqlcgen.UpsertTransactionParams, error) {
 	var pending int64
 	if tx.GetPending() {
 		pending = 1
@@ -156,6 +153,7 @@ func transactionParams(tx plaid.Transaction, cfg *Config) (sqlcgen.UpsertTransac
 		CategoryConfidence: tx.GetPersonalFinanceCategory().ConfidenceLevel.Get(),
 		PaymentChannel:     tx.GetPaymentChannel(),
 		Pending:            pending,
+		Notified:           notified,
 		RawJson:            encryptedRawJSON(tx, tx.GetTransactionId(), cfg.DBCryptKey),
 	}, nil
 }
