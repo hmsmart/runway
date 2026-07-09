@@ -7,7 +7,7 @@ package sqlcgen
 
 import (
 	"context"
-	"database/sql"
+	"time"
 )
 
 const getAccountById = `-- name: GetAccountById :one
@@ -93,25 +93,24 @@ ON CONFLICT(account_id) DO UPDATE SET
   balance_available = excluded.balance_available,
   balance_current = excluded.balance_current,
   iso_currency_code = excluded.iso_currency_code,
-  tracked = excluded.tracked,
   last_synced_at = excluded.last_synced_at,
   raw_json = excluded.raw_json
 WHERE excluded.last_synced_at > accounts.last_synced_at OR accounts.last_synced_at IS NULL
 `
 
 type UpsertAccountParams struct {
-	AccountID        string          `json:"account_id"`
-	ItemID           string          `json:"item_id"`
-	Name             string          `json:"name"`
-	Mask             sql.NullString  `json:"mask"`
-	Type             sql.NullString  `json:"type"`
-	Subtype          sql.NullString  `json:"subtype"`
-	BalanceAvailable sql.NullFloat64 `json:"balance_available"`
-	BalanceCurrent   sql.NullFloat64 `json:"balance_current"`
-	IsoCurrencyCode  sql.NullString  `json:"iso_currency_code"`
-	Tracked          int64           `json:"tracked"`
-	LastSyncedAt     sql.NullTime    `json:"last_synced_at"`
-	RawJson          sql.NullString  `json:"raw_json"`
+	AccountID        string     `json:"account_id"`
+	ItemID           string     `json:"item_id"`
+	Name             string     `json:"name"`
+	Mask             *string    `json:"mask"`
+	Type             *string    `json:"type"`
+	Subtype          *string    `json:"subtype"`
+	BalanceAvailable *float64   `json:"balance_available"`
+	BalanceCurrent   *float64   `json:"balance_current"`
+	IsoCurrencyCode  *string    `json:"iso_currency_code"`
+	Tracked          int64      `json:"tracked"`
+	LastSyncedAt     *time.Time `json:"last_synced_at"`
+	RawJson          *string    `json:"raw_json"`
 }
 
 func (q *Queries) UpsertAccount(ctx context.Context, arg UpsertAccountParams) error {

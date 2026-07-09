@@ -37,3 +37,5 @@ go.work.sum
 data/
 tmp/
 release/
+__debug_*
+.vscode/*

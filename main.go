@@ -33,7 +33,7 @@ func main() {
 func run(ctx context.Context) error {
 	cfg := LoadSettings()
 
-	store, err := database.GetStore(ctx, cfg.DBPath)
+	store, err := database.GetStore(ctx, cfg.DBPath, cfg.TokenTTL)
 	if err != nil {
 		return fmt.Errorf("failed to open databse: %w", err)
 	}
@@ -43,11 +43,12 @@ func run(ctx context.Context) error {
 
 	//Connect to Telegram
 
-	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId)
+	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId, store, cfg.TokenTTL)
 	if err != nil {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
-	tg.RegisterHandlers(store)
+	notify := tg.NotifyTransaction
+	tg.RegisterHandlers()
 	go tg.bot.Start(ctx)
 	slog.Info("telegram setup")
 
@@ -63,8 +64,9 @@ func run(ctx context.Context) error {
 	//Start HTTP Server
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealthz(store))
-	mux.Handle("GET /link", handleLink(plaidClient, cfg))
-	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg))
+	mux.Handle("GET /link", handleLink(plaidClient, cfg, store))
+	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, notify))
+	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, notify))
 
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: mux}
 
@@ -84,12 +86,14 @@ func run(ctx context.Context) error {
 			return
 		}
 		for _, item := range items {
-			accesstoken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
+			accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
 			if err != nil {
-				slog.Error("failed decrypt access token for", "item", item.ItemID, "err", err)
+				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)
+				continue
 			}
-			cursor := NullStringToPtr(item.Cursor)
-			syncTranscations(ctx, item.ItemID, accesstoken, cursor, plaidClient, store, cfg)
+			if err := syncItem(ctx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
+				slog.Error("startup sync failed", "item", item.ItemID, "err", err)
+			}
 		}
 	}()
 

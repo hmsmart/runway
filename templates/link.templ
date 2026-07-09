@@ -16,7 +16,7 @@ templ LinkPage(linkToken string) {
 						const res = await fetch('/exchange-token', {
 							method: 'POST',
 							headers: {'Content-Type': 'application/json'},
-							body: JSON.stringify({public_token: publicToken})
+							body: JSON.stringify({public_token: publicToken, link_token: btn.dataset.token})
 						});
 						document.getElementById('status').textContent = res.ok
 							? 'Linked: ' + (metadata.institution?.name ?? 'account')

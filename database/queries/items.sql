@@ -5,6 +5,7 @@ SELECT * FROM items WHERE status = 'active' ORDER BY created_at DESC;
 -- name: CreateItem :exec
 INSERT INTO items (
     item_id,
+    user_id,
     access_token,
     institution_name,
     status
@@ -12,5 +13,8 @@ INSERT INTO items (
     ?,
     ?,
     ?,
+    ?,
     ?
 );
+-- name: UpdateItemCursor :exec
+UPDATE items SET cursor = ?, last_synced_at = ? WHERE item_id = ?;

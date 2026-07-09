@@ -31,7 +31,7 @@ type Config struct {
 	PlaidCountryCodes string            `envconfig:"PLAID_COUNTRY_CODES" default:"US,CA"`
 	PlaidRedirectURI  string            `envconfig:"PLAID_REDIRECT_URI"`
 	PlaidWebhookURL   string            `envconfig:"PLAID_WEBHOOK_URL" default:"https://gpws.kawaiide.su/hook/plaid"`
-	PlaidClientUserID string            `envconfig:"PLAID_CLIENT_USER_ID" default:"hayden"`
+	TokenTTL          time.Duration     `envconfig:"TOKEN_TTL" default:"30m"`
 }
 
 var Env Config
@@ -58,6 +58,10 @@ func LoadSettings() *Config {
 	}
 	if Env.PlaidTimeout > maxPlaidTimeout {
 		slog.Error("PLAID_TIMEOUT must not exceed 300 seconds")
+		os.Exit(1)
+	}
+	if Env.TokenTTL < time.Minute {
+		slog.Error("TOKEN_TTL must be at least one minute")
 		os.Exit(1)
 	}
 	switch Env.PlaidEnvName {

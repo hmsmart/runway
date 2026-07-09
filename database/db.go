@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/domains"
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
@@ -18,7 +21,9 @@ var migrationsFS embed.FS
 
 type Store struct {
 	*sqlcgen.Queries
-	db *sql.DB
+	db         *sql.DB
+	TGTokens   *ttlcache.Cache[string, domains.User]
+	LinkTokens *ttlcache.Cache[string, domains.User]
 }
 
 func newDatabase(ctx context.Context, dbPath string) (*sql.DB,
@@ -51,14 +56,20 @@ func newDatabase(ctx context.Context, dbPath string) (*sql.DB,
 	return db, nil
 }
 
-func GetStore(ctx context.Context, dbPath string) (*Store, error) {
+func GetStore(ctx context.Context, dbPath string, tokenTTL time.Duration) (*Store, error) {
 	db, err := newDatabase(ctx, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database connection: %w", err)
 	}
+	TGTokens := ttlcache.New(ttlcache.WithTTL[string, domains.User](tokenTTL))
+	LinkTokens := ttlcache.New(ttlcache.WithTTL[string, domains.User](tokenTTL))
+	go TGTokens.Start()
+	go LinkTokens.Start()
 	return &Store{
-		Queries: sqlcgen.New(db),
-		db:      db,
+		Queries:    sqlcgen.New(db),
+		db:         db,
+		TGTokens:   TGTokens,
+		LinkTokens: LinkTokens,
 	}, nil
 }
 

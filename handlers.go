@@ -32,12 +32,13 @@ func handleHealthz(store *database.Store) http.HandlerFunc {
 		w.Write([]byte("ok"))
 	}
 }
-func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cfg *Config) http.HandlerFunc {
+func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, notify TransactionNotifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		slog.Info("unwrapping pubtoken exchange request", "for", ip)
 		var body struct {
 			PublicToken string `json:"public_token"`
+			LinkToken   string `json:"link_token"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -45,7 +46,17 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		slog.Info("begin pub token exchange", "for", ip)
+		// The link token ties this exchange back to the Telegram user who
+		// requested /link; without a live cache entry the POST is a stranger.
+		cached := store.LinkTokens.Get(body.LinkToken)
+		if cached == nil {
+			slog.Info("exchange with unknown or expired link token", "for", ip)
+			http.Error(w, "bad token", http.StatusBadRequest)
+			return
+		}
+		store.LinkTokens.Delete(body.LinkToken)
+		tgUser := cached.Value()
+		slog.Info("begin pub token exchange", "for", ip, "user", tgUser.Username())
 		exchangeRequest := plaid.NewItemPublicTokenExchangeRequest(body.PublicToken)
 		callCtx, cancel := context.WithTimeout(r.Context(), cfg.PlaidTimeout)
 		defer cancel()
@@ -78,8 +89,9 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		}
 		err = store.CreateItem(persistCtx, sqlcgen.CreateItemParams{
 			ItemID:          item.ItemId,
+			UserID:          tgUser.ID(),
 			AccessToken:     atenc,
-			InstitutionName: ToNullString(item.GetInstitutionNameOk()),
+			InstitutionName: StringPtrOk(item.GetInstitutionNameOk()),
 			Status:          "active",
 		})
 		if err != nil {
@@ -88,29 +100,33 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			return
 		}
 		slog.Info("successfully added new item to database", "for", ip)
-		// fire and forget the heavy stuff
+		// fire and forget the heavy stuff; persistCtx outlives the request
 		go func() {
-			// new context — the request context dies after the 200
-			ctx := context.Background()
-			if err := syncAllAccounts(ctx, item.ItemId, plaidClient, store, cfg); err != nil {
-				slog.Error("post-link account sync failed", "item", item.ItemId, "err", err)
-				return
-			}
-			if err := syncTranscations(ctx, item.ItemId, accessToken, nil, plaidClient, store, cfg); err != nil {
-				slog.Error("post-link transaction sync failed", "item", item.ItemId, "err", err)
-				return
+			if err := syncItem(persistCtx, item.ItemId, accessToken, nil, plaidClient, store, cfg, notify); err != nil {
+				slog.Error("post-link sync failed", "item", item.ItemId, "err", err)
 			}
 		}()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("linked"))
 	}
 }
-func handleLink(plaidClient *plaid.APIClient, cfg *Config) http.HandlerFunc {
+func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		slog.Info("begin link request", "for", ip)
+		token := r.URL.Query().Get("token")
+		cached := store.TGTokens.Get(token)
+		if cached == nil {
+			http.Error(w, "bad token", http.StatusBadRequest)
+			return
+		}
+		// Link tokens are single-use: dead once redeemed. The cached user is
+		// the identity here — it was written by an authenticated /link chat.
+		store.TGTokens.Delete(token)
+		tgUser := cached.Value()
+		slog.Info("link token redeemed", "for", ip, "user", tgUser.Username())
 		user := plaid.LinkTokenCreateRequestUser{
-			ClientUserId: cfg.PlaidClientUserID,
+			ClientUserId: tgUser.ID(),
 		}
 		depository := plaid.DepositoryFilter{
 			AccountSubtypes: []plaid.DepositoryAccountSubtype{
@@ -147,6 +163,7 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config) http.HandlerFunc {
 			return
 		}
 		plaidLinkToken := linkTokenCreateResp.GetLinkToken()
+		store.LinkTokens.Set(plaidLinkToken, tgUser, cfg.TokenTTL)
 		templates.LinkPage(plaidLinkToken).Render(r.Context(), w)
 	}
 }
