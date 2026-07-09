@@ -9,6 +9,9 @@ UPDATE users
 SET tg_id = ?, active = 1
 WHERE invite_code = ? AND tg_id IS NULL;
 
+-- name: SetDiscretionary :exec
+UPDATE users SET discretionary_monthly = ? WHERE id = ?;
+
 -- name: DeleteUser :exec
 DELETE FROM users WHERE id = ?;
 

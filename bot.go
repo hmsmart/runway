@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +95,9 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 			slog.Info("user not located in database", "chatID", chatID)
 		} else if err != nil {
 			slog.Error("failed to query database for user", "chatID", chatID, "err", err)
+			// Scan can fail mid-row (e.g. a malformed column value) and leave
+			// the earlier fields populated; don't act on a half-read user.
+			row = sqlcgen.User{}
 		}
 		next(WithUser(ctx, domains.NewUser(row)), b, update)
 	}
@@ -182,6 +186,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleStart, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/ping", bot.MatchTypeExact,
 		chain(t.handlePing, t.fetchUser, t.syncCommands))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/budget", bot.MatchTypePrefix,
+		chain(t.handleBudget, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/links", bot.MatchTypeExact,
@@ -214,9 +220,15 @@ func (t *TelegramBot) RegisterHandlers() {
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("called start", "chatID", update.Message.Chat.ID)
-	if UserFromContext(ctx).Has(domains.PermissionActive) {
+	user := UserFromContext(ctx)
+	if user.Has(domains.PermissionActive) {
+		if user.Discretionary() == nil {
+			t.sendText(ctx, b, update.Message.Chat.ID,
+				"Welcome back to Runway! Before you can link an account, I need your monthly discretionary budget.\n\n"+budgetExplainer)
+			return
+		}
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"Welcome back to Runway! You're already registered — use /link to connect a bank account.")
+			"Welcome back to Runway! You're already registered — use /link to connect a bank account, or /budget to adjust your monthly discretionary budget.")
 		return
 	}
 	t.sendText(ctx, b, update.Message.Chat.ID,
@@ -277,9 +289,82 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 	welcome := func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		slog.Info("registration successful", "chatID", update.Message.Chat.ID, "code", regcode)
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"Welcome to Runway! You're registered — use /link to connect your first bank account.")
+			"Welcome to Runway! You're registered.\n\n"+
+				"First, let's set your monthly discretionary budget — that's the number I'll track your spending against.\n\n"+budgetExplainer)
 	}
 	chain(welcome, t.fetchUser, t.syncCommands)(ctx, b, update)
+}
+
+// budgetExplainer coaches the user on what counts as discretionary and how to
+// set it. Runway only tracks controllable spending, so fixed obligations stay
+// out of the number.
+const budgetExplainer = "Think about what you spend in a typical month on things you choose — dining out, shopping, hobbies, fun. " +
+	"Leave out fixed bills like rent or mortgage, insurance, and utilities; Runway only tracks the spending you can actually control.\n\n" +
+	"When you have a number, send /budget followed by the amount (e.g. /budget 1500)."
+
+// parseBudget turns user input like "1500", "$1,500" or "1500.50" into a
+// dollar amount, rejecting non-positive and absurd values.
+func parseBudget(s string) (float64, error) {
+	s = strings.TrimPrefix(s, "$")
+	s = strings.ReplaceAll(s, ",", "")
+	amt, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	// Truncate to cents so stored budgets stay presentable; validate after,
+	// so sub-cent inputs can't round down to zero. The range check is phrased
+	// positively because NaN fails every comparison ("/budget nan" parses).
+	amt = math.Floor(amt*100) / 100
+	if !(amt > 0 && amt < 1_000_000) {
+		return 0, fmt.Errorf("amount out of range: %v", amt)
+	}
+	return amt, nil
+}
+
+// handleBudget sets or shows the user's monthly discretionary budget. Setting
+// it for the first time completes setup and unlocks /link.
+func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := UserFromContext(ctx)
+	slog.Info("called budget", "chatID", update.Message.Chat.ID)
+	parts := strings.Fields(update.Message.Text)
+	if len(parts) == 1 {
+		if cur := user.Discretionary(); cur != nil {
+			t.sendText(ctx, b, update.Message.Chat.ID,
+				fmt.Sprintf("Your monthly discretionary budget is $%.2f. To change it, send /budget followed by the new amount (e.g. /budget 1500).", *cur))
+			return
+		}
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"You haven't set a monthly discretionary budget yet.\n\n"+budgetExplainer)
+		return
+	}
+	amt, err := parseBudget(parts[1])
+	if len(parts) != 2 || err != nil {
+		slog.Info("invalid budget amount", "chatID", update.Message.Chat.ID, "message", update.Message.Text)
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"I couldn't read that amount. Send /budget followed by a dollar amount, e.g. /budget 1500 or /budget 1,500.50.")
+		return
+	}
+	firstTime := user.Discretionary() == nil
+	err = t.store.SetDiscretionary(ctx, sqlcgen.SetDiscretionaryParams{
+		DiscretionaryMonthly: &amt,
+		ID:                   user.ID(),
+	})
+	if err != nil {
+		slog.Error("failed to set discretionary budget", "chatID", update.Message.Chat.ID, "err", err)
+		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
+		return
+	}
+	slog.Info("budget set", "chatID", update.Message.Chat.ID, "amount", amt, "firstTime", firstTime)
+	confirm := func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		text := fmt.Sprintf("Updated! Your monthly discretionary budget is now $%.2f.", amt)
+		if firstTime {
+			text = fmt.Sprintf("Budget set: $%.2f/month of discretionary spending.\n\nNow use /link to connect your first bank account and I'll start tracking against it.", amt)
+		}
+		t.sendText(ctx, b, update.Message.Chat.ID, text)
+	}
+	// Reload the user so syncCommands unhides the link commands now that
+	// setup is complete, then send the confirmation.
+	chain(confirm, t.fetchUser, t.syncCommands)(ctx, b, update)
 }
 
 func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -312,6 +397,14 @@ func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models
 	if user == nil {
 		slog.Error("something happened where a user was allowed to /link without proper context")
 		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
+		return
+	}
+	// Linking is gated on a budget: without one there's nothing to track
+	// spending against, so finish setup first.
+	if user.Discretionary() == nil {
+		slog.Info("link attempted without budget set", "chatID", update.Message.Chat.ID)
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"Almost there — before linking an account, I need your monthly discretionary budget so I have something to track your spending against.\n\n"+budgetExplainer)
 		return
 	}
 	token := RandomToken(16, Base64)
@@ -430,12 +523,21 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 	if user.Has(domains.PermissionActive) {
 		cmds = []models.BotCommand{
 			{Command: "ping", Description: "Check that Runway is up"},
-			{Command: "link", Description: "Link a bank account"},
-			{Command: "links", Description: "List your linked accounts"},
-			{Command: "unlink", Description: "Unlink an account by number"},
+			{Command: "budget", Description: "Set your monthly discretionary budget"},
 		}
-		if user.Has(domains.PermissionInvite) {
-			cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Create an invite code for a new user"})
+		// Until the budget is set, setting it is the user's only real task,
+		// so linking and invites stay out of the menu until setup completes.
+		// Unregister always shows: the exit should never be hidden. The
+		// commands themselves still work if typed — this only trims the menu.
+		if user.Discretionary() != nil {
+			cmds = append(cmds,
+				models.BotCommand{Command: "link", Description: "Link a bank account"},
+				models.BotCommand{Command: "links", Description: "List your linked accounts"},
+				models.BotCommand{Command: "unlink", Description: "Unlink an account by number"},
+			)
+			if user.Has(domains.PermissionInvite) {
+				cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Create an invite code for a new user"})
+			}
 		}
 		cmds = append(cmds, models.BotCommand{Command: "unregister", Description: "Delete your data and leave Runway"})
 	}

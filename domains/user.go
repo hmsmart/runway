@@ -15,11 +15,12 @@ const (
 )
 
 type User struct {
-	userID      string
-	telegramID  int64
-	username    string
-	firstname   string
-	permissions []Permission
+	userID        string
+	telegramID    int64
+	username      string
+	firstname     string
+	discretionary *float64
+	permissions   []Permission
 }
 
 // NewUser adapts a database row to the domain model. A row with no Telegram
@@ -41,6 +42,7 @@ func NewUser(u sqlcgen.User) *User {
 	} else {
 		newuser.username = *u.TgUsername
 	}
+	newuser.discretionary = u.DiscretionaryMonthly
 	newuser.permissions = make([]Permission, 0)
 	if u.Active == true {
 		newuser.permissions = append(newuser.permissions, PermissionActive)
@@ -59,6 +61,10 @@ func (u *User) Has(p Permission) bool {
 	}
 	return slices.Contains(u.permissions, p)
 }
+
+// Discretionary returns the user's monthly discretionary budget, or nil if
+// they haven't set one yet. Setup requires it before an account can be linked.
+func (u *User) Discretionary() *float64 { return u.discretionary }
 
 func (u *User) ID() string        { return u.userID }
 func (u *User) TelegramID() int64 { return u.telegramID }

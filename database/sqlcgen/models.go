@@ -65,12 +65,13 @@ type Transaction struct {
 }
 
 type User struct {
-	ID          string    `json:"id"`
-	TgID        *int64    `json:"tg_id"`
-	TgUsername  *string   `json:"tg_username"`
-	TgFirstName *string   `json:"tg_first_name"`
-	InviteCode  string    `json:"invite_code"`
-	CanInvite   bool      `json:"can_invite"`
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID                   string    `json:"id"`
+	TgID                 *int64    `json:"tg_id"`
+	TgUsername           *string   `json:"tg_username"`
+	TgFirstName          *string   `json:"tg_first_name"`
+	InviteCode           string    `json:"invite_code"`
+	CanInvite            bool      `json:"can_invite"`
+	Active               bool      `json:"active"`
+	CreatedAt            time.Time `json:"created_at"`
+	DiscretionaryMonthly *float64  `json:"discretionary_monthly"`
 }

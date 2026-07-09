@@ -46,7 +46,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id string) error {
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at FROM users WHERE id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly FROM users WHERE id = ? and active = 1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -61,12 +61,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.CanInvite,
 		&i.Active,
 		&i.CreatedAt,
+		&i.DiscretionaryMonthly,
 	)
 	return i, err
 }
 
 const getUserByTelegram = `-- name: GetUserByTelegram :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at FROM users WHERE tg_id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly FROM users WHERE tg_id = ? and active = 1
 `
 
 func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, error) {
@@ -81,6 +82,7 @@ func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, err
 		&i.CanInvite,
 		&i.Active,
 		&i.CreatedAt,
+		&i.DiscretionaryMonthly,
 	)
 	return i, err
 }
@@ -98,4 +100,18 @@ type RedeemInviteCodeParams struct {
 
 func (q *Queries) RedeemInviteCode(ctx context.Context, arg RedeemInviteCodeParams) (sql.Result, error) {
 	return q.db.ExecContext(ctx, redeemInviteCode, arg.TgID, arg.InviteCode)
+}
+
+const setDiscretionary = `-- name: SetDiscretionary :exec
+UPDATE users SET discretionary_monthly = ? WHERE id = ?
+`
+
+type SetDiscretionaryParams struct {
+	DiscretionaryMonthly *float64 `json:"discretionary_monthly"`
+	ID                   string   `json:"id"`
+}
+
+func (q *Queries) SetDiscretionary(ctx context.Context, arg SetDiscretionaryParams) error {
+	_, err := q.db.ExecContext(ctx, setDiscretionary, arg.DiscretionaryMonthly, arg.ID)
+	return err
 }
