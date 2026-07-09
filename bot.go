@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/google/uuid"
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/hmsmart/runway/domains"
@@ -146,6 +147,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handlePing, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/invite", bot.MatchTypeExact,
+		chain(t.handleInvite, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionInvite)))
 
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/register", bot.MatchTypePrefix,
 		chain(t.handleRegistration, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionUnregistered)))
@@ -259,6 +262,45 @@ func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update
 	chain(welcome, t.fetchUser, t.syncCommands)(ctx, b, update)
 }
 
+func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *models.Update) {
+	invUser := UserFromContext(ctx)
+	inviteCode := RandomToken(5, Base32)
+	userID, err := uuid.NewV7()
+	if err != nil {
+		slog.Error("failed to generate uuid", "chatID", invUser.TelegramID(), "err", err)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "I experienced a temporary error during Invite Generation, try again later.",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", invUser.TelegramID(), "err", err)
+		}
+		return
+	}
+	err = t.store.CreateInviteCode(ctx, sqlcgen.CreateInviteCodeParams{
+		ID:         userID.String(),
+		InviteCode: inviteCode,
+	})
+	if err != nil {
+		slog.Error("failed to insert invite", "chatID", invUser.TelegramID(), "err", err)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "I experienced a temporary error during Invite Generation, try again later.",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", invUser.TelegramID(), "err", err)
+		}
+		return
+	}
+	slog.Info("invite created", "chatID", invUser.TelegramID())
+	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   fmt.Sprintf("Invite created! Share this code, %s, with the invitee, and have them register using /register", inviteCode),
+	})
+	if err != nil {
+		slog.Error("failed to send message", "chatID", invUser.TelegramID(), "err", err)
+	}
+}
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
 	user := UserFromContext(ctx)
@@ -273,7 +315,7 @@ func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models
 		}
 		return
 	}
-	token := RandomToken(16)
+	token := RandomToken(16, Base64)
 	t.store.TGTokens.Set(token, *user, t.tokenTTL)
 	params := url.Values{}
 	params.Set("token", token)

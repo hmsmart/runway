@@ -4,8 +4,17 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+)
+
+type base int
+
+const (
+	Base64 base = 64
+	Base32 base = 32
 )
 
 func EncryptColumnSecret(plainText string, primaryKey string, key []byte) (string, error) {
@@ -77,8 +86,21 @@ func DecryptColumnSecret(encryptedText string, primaryKey string, key []byte) (s
 	return string(plaintext), nil
 }
 
-func RandomToken(n int) string {
-	b := make([]byte, n)
+func RandomToken(n int, b base) string {
+	bytes := make([]byte, n)
+	rand.Read(bytes)
+	switch b {
+	case Base32:
+		return base32.StdEncoding.EncodeToString(bytes)
+	case Base64:
+		return base64.StdEncoding.EncodeToString(bytes)
+	default:
+		return hex.EncodeToString(bytes)
+	}
+}
+
+func GenerateInviteToken() string {
+	b := make([]byte, 5)
 	rand.Read(b)
-	return base64.StdEncoding.EncodeToString(b)
+	return base32.StdEncoding.EncodeToString(b)
 }

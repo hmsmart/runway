@@ -10,6 +10,32 @@ import (
 	"database/sql"
 )
 
+const createInviteCode = `-- name: CreateInviteCode :exec
+INSERT INTO users (
+    id,
+    tg_id,
+    invite_code,
+    active,
+    can_invite
+) VALUES (
+    ?,
+    NULL,
+    ?,
+    0,
+    0
+)
+`
+
+type CreateInviteCodeParams struct {
+	ID         string `json:"id"`
+	InviteCode string `json:"invite_code"`
+}
+
+func (q *Queries) CreateInviteCode(ctx context.Context, arg CreateInviteCodeParams) error {
+	_, err := q.db.ExecContext(ctx, createInviteCode, arg.ID, arg.InviteCode)
+	return err
+}
+
 const getUserByID = `-- name: GetUserByID :one
 SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at FROM users WHERE id = ? and active = 1
 `
