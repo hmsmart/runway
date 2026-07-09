@@ -31,7 +31,8 @@ go.work.sum
 *.db
 # Editor/IDE
 # .idea/
-# .vscode/
+
+.vscode/
 .DS_Store
 .gitignore
 data/
