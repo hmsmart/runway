@@ -146,10 +146,18 @@ func (t *TelegramBot) deny(ctx context.Context, b *bot.Bot, update *models.Updat
 		t.answerCallback(ctx, b, update, "Not authorized")
 		return
 	}
-	if update.Message != nil {
+	if update.Message == nil {
+		return
+	}
+	// Nil means genuinely unregistered; anyone else who fails a permission
+	// check (e.g. /invite without invite rights) is already registered, so
+	// telling them to /register would just send them in a circle.
+	if UserFromContext(ctx) == nil {
 		t.sendText(ctx, b, update.Message.Chat.ID,
 			"You're not authorized. If you have an invite code, send /register followed by the code to get started.")
+		return
 	}
+	t.sendText(ctx, b, update.Message.Chat.ID, "You don't have permission to do that.")
 }
 
 // sendText sends a plain-text message and logs delivery failures. Sends that
@@ -186,12 +194,16 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleStart, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/ping", bot.MatchTypeExact,
 		chain(t.handlePing, t.fetchUser, t.syncCommands))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeExact,
+		chain(t.handleHelp, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/budget", bot.MatchTypePrefix,
 		chain(t.handleBudget, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/links", bot.MatchTypeExact,
 		chain(t.handleLinks, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/balance", bot.MatchTypeExact,
+		chain(t.handleBalance, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unlink", bot.MatchTypePrefix,
 		chain(t.handleUnlink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unregister", bot.MatchTypeExact,
@@ -228,13 +240,66 @@ func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *model
 			return
 		}
 		t.sendText(ctx, b, update.Message.Chat.ID,
-			"Welcome back to Runway! You're already registered — use /link to connect a bank account, or /budget to adjust your monthly discretionary budget.")
+			"Welcome back to Runway! You're all set up — /link to connect another account, /balance to check your accounts, "+
+				"or /budget to adjust your monthly discretionary budget. /help lists everything I can do.")
 		return
 	}
 	t.sendText(ctx, b, update.Message.Chat.ID,
-		"Welcome to Runway! I watch your linked bank accounts and message you when new transactions come in.\n\n"+
-			"Runway is invite-only, so you'll need an invite code from an existing user. "+
-			"There's no rush — whenever you have one, send /register followed by the code (e.g. /register ABCD-2234).")
+		"Welcome to Runway! I help you keep your monthly discretionary spending — the stuff you choose to spend, "+
+			"like dining out or shopping, not rent or bills — under a budget you set.\n\n"+
+			"Runway is invite-only, so you'll need an invite code from an existing user. Once you have one:\n"+
+			"1. /register the code\n"+
+			"2. /budget to set your monthly discretionary budget\n"+
+			"3. /link to connect a bank account\n\n"+
+			"There's no rush — whenever you have a code, send /register followed by it (e.g. /register ABCD-2234). "+
+			"/help explains more.")
+}
+
+// handleHelp explains what Runway does and which commands are available,
+// tailored to how far along the sender is: an unregistered sender gets the
+// pitch and setup steps, an active user gets the full command reference plus
+// what the Spread/Exclude transaction buttons do.
+func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	var text string
+	switch {
+	case !user.Has(domains.PermissionActive):
+		text = "🧭 <b>Runway</b> tracks your monthly discretionary spending — the stuff you choose to spend " +
+			"(dining out, shopping, fun), not fixed bills like rent or insurance.\n\n" +
+			"Getting started:\n" +
+			"1. <code>/register CODE</code> — join with an invite code\n" +
+			"2. <code>/budget AMOUNT</code> — set your monthly discretionary budget\n" +
+			"3. /link — connect a bank account\n\n" +
+			"/ping — check that I'm up"
+	case user.Discretionary() == nil:
+		text = "🧭 <b>Runway commands</b>\n\n" +
+			"<code>/budget AMOUNT</code> — set your monthly discretionary budget (required before linking)\n" +
+			"/unregister — delete your data and leave\n\n" +
+			"Once your budget is set, /link unlocks so you can connect a bank account."
+	default:
+		text = "🧭 <b>Runway commands</b>\n\n" +
+			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
+			"/link — connect a bank account\n" +
+			"/links — list your linked accounts\n" +
+			"<code>/unlink N</code> — unlink an account by number\n" +
+			"/balance — show your account balances\n"
+		if user.Has(domains.PermissionInvite) {
+			text += "/invite — create an invite code for a new user\n"
+		}
+		text += "/unregister — delete your data and leave\n\n" +
+			"Each transaction I send has two buttons: <b>📊 Spread</b> spreads a big one-off purchase across weeks " +
+			"or months so it doesn't blow your budget in a single day, and <b>🚫 Exclude</b> leaves it out of your " +
+			"discretionary spend entirely (handy for things like a rent payment or transfer that slipped through)."
+	}
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		slog.Error("failed to send help", "chatID", chatID, "err", err)
+	}
 }
 
 func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -330,7 +395,7 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 	if len(parts) == 1 {
 		if cur := user.Discretionary(); cur != nil {
 			t.sendText(ctx, b, update.Message.Chat.ID,
-				fmt.Sprintf("Your monthly discretionary budget is $%.2f. To change it, send /budget followed by the new amount (e.g. /budget 1500).", *cur))
+				fmt.Sprintf("Your monthly discretionary budget is %s/month. To change it, send /budget followed by the new amount (e.g. /budget 1500).", formatDollars(*cur)))
 			return
 		}
 		t.sendText(ctx, b, update.Message.Chat.ID,
@@ -356,9 +421,9 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 	}
 	slog.Info("budget set", "chatID", update.Message.Chat.ID, "amount", amt, "firstTime", firstTime)
 	confirm := func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		text := fmt.Sprintf("Updated! Your monthly discretionary budget is now $%.2f.", amt)
+		text := fmt.Sprintf("Updated! Your monthly discretionary budget is now %s/month.", formatDollars(amt))
 		if firstTime {
-			text = fmt.Sprintf("Budget set: $%.2f/month of discretionary spending.\n\nNow use /link to connect your first bank account and I'll start tracking against it.", amt)
+			text = fmt.Sprintf("Budget set: %s/month of discretionary spending.\n\nNow use /link to connect your first bank account and I'll start tracking against it.", formatDollars(amt))
 		}
 		t.sendText(ctx, b, update.Message.Chat.ID, text)
 	}
@@ -389,7 +454,7 @@ func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *mode
 	// Hyphenate for readability; /register strips the dash before matching.
 	displayCode := inviteCode[:4] + "-" + inviteCode[4:]
 	t.sendText(ctx, b, update.Message.Chat.ID,
-		fmt.Sprintf("Invite created! Share this invite code with the invitee: %s\nThey can redeem it by sending me /register %s", displayCode, displayCode))
+		fmt.Sprintf("Invite created! Share this invite code with your friend: %s\nThey can redeem it by sending me /register %s", displayCode, displayCode))
 }
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
@@ -436,7 +501,7 @@ func (t *TelegramBot) handleMenu(ctx context.Context, b *bot.Bot, update *models
 	menu, txID := parts[1], parts[2]
 	switch menu {
 	case "amort":
-		// The amortize menu only offers Mortize when there's an end date
+		// The spread menu only offers Unspread when there's an end date
 		// to clear, so read the row's current state.
 		tx, err := t.store.GetTransaction(ctx, txID)
 		if err != nil {
@@ -498,7 +563,7 @@ func (t *TelegramBot) handleAmortize(ctx context.Context, b *bot.Bot, update *mo
 		return
 	}
 	t.refreshMessage(ctx, b, update, txID)
-	t.answerCallback(ctx, b, update, "Amortizing over "+period.label)
+	t.answerCallback(ctx, b, update, "Spreading over "+period.label)
 }
 
 // handleMortize clears a transaction's amortization end date.
@@ -510,7 +575,7 @@ func (t *TelegramBot) handleMortize(ctx context.Context, b *bot.Bot, update *mod
 		return
 	}
 	t.refreshMessage(ctx, b, update, txID)
-	t.answerCallback(ctx, b, update, "Amortization removed")
+	t.answerCallback(ctx, b, update, "Spread removed")
 }
 
 // setCommandMenu writes the command menu a user should see given their
@@ -518,11 +583,13 @@ func (t *TelegramBot) handleMortize(ctx context.Context, b *bot.Bot, update *mod
 func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *domains.User) error {
 	cmds := []models.BotCommand{
 		{Command: "ping", Description: "Check that Runway is up"},
+		{Command: "help", Description: "Show what Runway can do"},
 		{Command: "register", Description: "Register with an invite code"},
 	}
 	if user.Has(domains.PermissionActive) {
 		cmds = []models.BotCommand{
 			{Command: "ping", Description: "Check that Runway is up"},
+			{Command: "help", Description: "Show what Runway can do"},
 			{Command: "budget", Description: "Set your monthly discretionary budget"},
 		}
 		// Until the budget is set, setting it is the user's only real task,
@@ -531,6 +598,7 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 		// commands themselves still work if typed — this only trims the menu.
 		if user.Discretionary() != nil {
 			cmds = append(cmds,
+				models.BotCommand{Command: "balance", Description: "Show your account balances"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "links", Description: "List your linked accounts"},
 				models.BotCommand{Command: "unlink", Description: "Unlink an account by number"},
@@ -553,7 +621,7 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 }
 
 // swapKeyboard replaces the inline keyboard on the message a callback came
-// from, e.g. expanding Amortize into its period options.
+// from, e.g. expanding Spread into its period options.
 func (t *TelegramBot) swapKeyboard(ctx context.Context, b *bot.Bot, update *models.Update, kb models.InlineKeyboardMarkup) {
 	msg := update.CallbackQuery.Message.Message
 	if msg == nil {
@@ -721,23 +789,23 @@ func transactionKeyboard(txID string, excluded bool) models.InlineKeyboardMarkup
 	return models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
-				{Text: "📊 Amortize", CallbackData: "menu:amort:" + txID},
+				{Text: "📊 Spread", CallbackData: "menu:amort:" + txID},
 				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
 			},
 		},
 	}
 }
 
-// amortizeKeyboard is the second-level menu shown after tapping Amortize.
+// amortizeKeyboard is the second-level menu shown after tapping Spread.
 // The period row always shows so a mis-tapped period can be corrected by
-// tapping again; Mortize (clear) only appears once the row is amortized.
+// tapping again; Unspread (clear) only appears once the row is spread.
 func amortizeKeyboard(txID string, amortized bool) models.InlineKeyboardMarkup {
 	bottom := []models.InlineKeyboardButton{
 		{Text: "⬅️ Back", CallbackData: "menu:main:" + txID},
 	}
 	if amortized {
 		bottom = append([]models.InlineKeyboardButton{
-			{Text: "❌ Mortize", CallbackData: "mortize:" + txID},
+			{Text: "❌ Unspread", CallbackData: "mortize:" + txID},
 		}, bottom...)
 	}
 	return models.InlineKeyboardMarkup{
@@ -763,6 +831,9 @@ func (t *TelegramBot) sendLinkedMessage(ctx context.Context, chatID int64, insti
 			"🏦 Thanks for linking <b>%s</b>!\n\n"+
 				"I'm collecting your last %d days of transactions now and will place them "+
 				"in this chat slowly and silently, so you can classify them at your convenience.\n\n"+
+				"Each one gets two buttons: <b>📊 Spread</b> spreads a big one-off purchase across weeks or months "+
+				"so it doesn't blow your budget in a single day, and <b>🚫 Exclude</b> leaves it out of your "+
+				"discretionary spend entirely (handy for things like a rent payment or transfer that slipped through).\n\n"+
 				"💡 Tip: set this chat's auto-delete to 1 month (chat menu → Auto-Delete) to keep the clutter down.",
 			inst, notifyWindowDays)
 	}
@@ -822,7 +893,9 @@ func formatLinkMessage(ttl time.Duration) string {
 	return fmt.Sprintf(
 		"🔗 <b>Connect Your Bank Account</b>\n\n"+
 			"Tap the link below to securely connect your account through Plaid. "+
-			"This link is <b>single-use</b> and expires in %s.\n\n", humanDuration(ttl))
+			"This link is <b>single-use</b> and expires in %s.\n\n"+
+			"Once it's linked, I'll pull the last %d days of transactions and start tracking them against your budget.",
+		humanDuration(ttl), notifyWindowDays)
 }
 
 // humanDuration renders a duration for user-facing text, e.g. "30 minutes".
@@ -859,7 +932,7 @@ func formatTransactionMessage(tx sqlcgen.Transaction) string {
 	}
 	absAmount := math.Abs(tx.Amount)
 
-	b.WriteString(fmt.Sprintf("%s <b>%s$%.2f</b>  %s\n", emoji, sign, absAmount, html.EscapeString(label)))
+	b.WriteString(fmt.Sprintf("%s <b>%s%s</b>  %s\n", emoji, sign, formatDollarsCents(absAmount), html.EscapeString(label)))
 
 	if tx.CategoryPrimary != "" {
 		cat := displayCategory(tx.CategoryPrimary)
@@ -869,7 +942,7 @@ func formatTransactionMessage(tx sqlcgen.Transaction) string {
 		b.WriteString(fmt.Sprintf("🏷 %s\n", html.EscapeString(cat)))
 	}
 
-	b.WriteString(fmt.Sprintf("📅 %s", tx.Date))
+	b.WriteString(fmt.Sprintf("📅 %s", humanDate(tx.Date)))
 
 	if tx.PaymentChannel != "" {
 		b.WriteString(fmt.Sprintf("  ·  %s", html.EscapeString(tx.PaymentChannel)))
@@ -880,7 +953,7 @@ func formatTransactionMessage(tx sqlcgen.Transaction) string {
 	}
 
 	if tx.AmortEnd != nil {
-		b.WriteString(fmt.Sprintf("\n📊 <i>amortized until %s</i>", html.EscapeString(*tx.AmortEnd)))
+		b.WriteString(fmt.Sprintf("\n📊 <i>spread until %s</i>", html.EscapeString(humanDate(*tx.AmortEnd))))
 	}
 
 	if tx.Excluded == 1 {
