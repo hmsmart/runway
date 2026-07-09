@@ -43,12 +43,12 @@ func run(ctx context.Context) error {
 
 	//Connect to Telegram
 
-	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId)
+	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId, store)
 	if err != nil {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
 	notify := tg.NotifyTransaction
-	tg.RegisterHandlers(ctx, store)
+	tg.RegisterHandlers()
 	go tg.bot.Start(ctx)
 	slog.Info("telegram setup")
 
@@ -91,7 +91,7 @@ func run(ctx context.Context) error {
 				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)
 				continue
 			}
-			if err := syncItem(ctx, item.ItemID, accessToken, NullStringToPtr(item.Cursor), plaidClient, store, cfg, notify); err != nil {
+			if err := syncItem(ctx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
 				slog.Error("startup sync failed", "item", item.ItemID, "err", err)
 			}
 		}

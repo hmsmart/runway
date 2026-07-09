@@ -5,59 +5,71 @@
 package sqlcgen
 
 import (
-	"database/sql"
 	"time"
 )
 
 type Account struct {
-	AccountID        string          `json:"account_id"`
-	ItemID           string          `json:"item_id"`
-	Name             string          `json:"name"`
-	Mask             sql.NullString  `json:"mask"`
-	BalanceAvailable sql.NullFloat64 `json:"balance_available"`
-	BalanceCurrent   sql.NullFloat64 `json:"balance_current"`
-	IsoCurrencyCode  sql.NullString  `json:"iso_currency_code"`
-	Type             sql.NullString  `json:"type"`
-	Subtype          sql.NullString  `json:"subtype"`
-	RawJson          sql.NullString  `json:"raw_json"`
-	CreatedAt        time.Time       `json:"created_at"`
-	LastSyncedAt     sql.NullTime    `json:"last_synced_at"`
-	Tracked          int64           `json:"tracked"`
+	AccountID        string     `json:"account_id"`
+	ItemID           string     `json:"item_id"`
+	Name             string     `json:"name"`
+	Mask             *string    `json:"mask"`
+	BalanceAvailable *float64   `json:"balance_available"`
+	BalanceCurrent   *float64   `json:"balance_current"`
+	IsoCurrencyCode  *string    `json:"iso_currency_code"`
+	Type             *string    `json:"type"`
+	Subtype          *string    `json:"subtype"`
+	RawJson          *string    `json:"raw_json"`
+	CreatedAt        time.Time  `json:"created_at"`
+	LastSyncedAt     *time.Time `json:"last_synced_at"`
+	Tracked          int64      `json:"tracked"`
 }
 
 type DailySpend struct {
-	Date         string          `json:"date"`
-	AccountID    string          `json:"account_id"`
-	Spend        float64         `json:"spend"`
-	SettledSpend float64         `json:"settled_spend"`
-	Ema14        sql.NullFloat64 `json:"ema_14"`
-	Ema28        sql.NullFloat64 `json:"ema_28"`
+	Date         string   `json:"date"`
+	AccountID    string   `json:"account_id"`
+	Spend        float64  `json:"spend"`
+	SettledSpend float64  `json:"settled_spend"`
+	Ema14        *float64 `json:"ema_14"`
+	Ema28        *float64 `json:"ema_28"`
 }
 
 type Item struct {
-	ItemID          string         `json:"item_id"`
-	AccessToken     string         `json:"access_token"`
-	InstitutionName sql.NullString `json:"institution_name"`
-	Status          string         `json:"status"`
-	Cursor          sql.NullString `json:"cursor"`
-	CreatedAt       time.Time      `json:"created_at"`
-	LastSyncedAt    sql.NullTime   `json:"last_synced_at"`
+	ItemID          string     `json:"item_id"`
+	AccessToken     string     `json:"access_token"`
+	InstitutionName *string    `json:"institution_name"`
+	Status          string     `json:"status"`
+	Cursor          *string    `json:"cursor"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LastSyncedAt    *time.Time `json:"last_synced_at"`
+	UserID          string     `json:"user_id"`
 }
 
 type Transaction struct {
-	TxID             string         `json:"tx_id"`
-	PlaidTxID        string         `json:"plaid_tx_id"`
-	AccountID        string         `json:"account_id"`
-	Date             string         `json:"date"`
-	Amount           float64        `json:"amount"`
-	Name             sql.NullString `json:"name"`
-	MerchantName     sql.NullString `json:"merchant_name"`
-	CategoryPrimary  sql.NullString `json:"category_primary"`
-	CategoryDetailed sql.NullString `json:"category_detailed"`
-	PaymentChannel   sql.NullString `json:"payment_channel"`
-	Pending          int64          `json:"pending"`
-	RemovedAt        sql.NullString `json:"removed_at"`
-	AmortEnd         sql.NullString `json:"amort_end"`
-	Excluded         int64          `json:"excluded"`
-	RawJson          sql.NullString `json:"raw_json"`
+	TxID               string  `json:"tx_id"`
+	PlaidTxID          string  `json:"plaid_tx_id"`
+	AccountID          string  `json:"account_id"`
+	Date               string  `json:"date"`
+	Amount             float64 `json:"amount"`
+	Name               string  `json:"name"`
+	MerchantName       *string `json:"merchant_name"`
+	CategoryPrimary    string  `json:"category_primary"`
+	CategoryDetailed   string  `json:"category_detailed"`
+	CategoryConfidence *string `json:"category_confidence"`
+	PaymentChannel     string  `json:"payment_channel"`
+	Pending            int64   `json:"pending"`
+	RemovedAt          *string `json:"removed_at"`
+	AmortEnd           *string `json:"amort_end"`
+	Excluded           int64   `json:"excluded"`
+	RawJson            *string `json:"raw_json"`
+}
+
+type User struct {
+	ID          string    `json:"id"`
+	TgID        *int64    `json:"tg_id"`
+	TgUsername  *string   `json:"tg_username"`
+	TgFirstName *string   `json:"tg_first_name"`
+	InviteCode  string    `json:"invite_code"`
+	CanInvite   bool      `json:"can_invite"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
 }

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS "transactions" (
     "account_id"         TEXT NOT NULL,
     "date"               TEXT NOT NULL,
     "amount"             REAL NOT NULL,
-    "name"               TEXT,
+    "name"               TEXT NOT NULL,
     "merchant_name"      TEXT,
     "category_primary"   TEXT,
     "category_detailed"  TEXT,

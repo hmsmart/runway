@@ -80,7 +80,7 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		err = store.CreateItem(persistCtx, sqlcgen.CreateItemParams{
 			ItemID:          item.ItemId,
 			AccessToken:     atenc,
-			InstitutionName: ToNullString(item.GetInstitutionNameOk()),
+			InstitutionName: StringPtrOk(item.GetInstitutionNameOk()),
 			Status:          "active",
 		})
 		if err != nil {

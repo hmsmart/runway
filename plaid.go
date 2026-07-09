@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -119,8 +118,8 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 			}
 		}
 		return q.UpdateItemCursor(ctx, sqlcgen.UpdateItemCursorParams{
-			Cursor:       sql.NullString{String: nextCursor, Valid: true},
-			LastSyncedAt: sql.NullTime{Time: now, Valid: true},
+			Cursor:       &nextCursor,
+			LastSyncedAt: &now,
 			ItemID:       itemID,
 		})
 	})
@@ -140,28 +139,24 @@ func transactionParams(tx plaid.Transaction, cfg *Config) (sqlcgen.UpsertTransac
 	if tx.GetPending() {
 		pending = 1
 	}
-	var catPrimary, catDetailed sql.NullString
-	if pfc, ok := tx.GetPersonalFinanceCategoryOk(); ok {
-		catPrimary = ToNullString(&pfc.Primary, true)
-		catDetailed = ToNullString(&pfc.Detailed, true)
-	}
 	txid, err := uuid.NewV7()
 	if err != nil {
 		return sqlcgen.UpsertTransactionParams{}, fmt.Errorf("generate tx uuid: %w", err)
 	}
 	return sqlcgen.UpsertTransactionParams{
-		TxID:             txid.String(),
-		PlaidTxID:        tx.GetTransactionId(),
-		AccountID:        tx.GetAccountId(),
-		Date:             tx.GetDate(),
-		Amount:           tx.GetAmount(),
-		Name:             ToNullString(tx.GetNameOk()),
-		MerchantName:     ToNullString(tx.GetMerchantNameOk()),
-		CategoryPrimary:  catPrimary,
-		CategoryDetailed: catDetailed,
-		PaymentChannel:   ToNullString(tx.GetPaymentChannelOk()),
-		Pending:          pending,
-		RawJson:          encryptedRawJSON(tx, tx.GetTransactionId(), cfg.DBCryptKey),
+		TxID:               txid.String(),
+		PlaidTxID:          tx.GetTransactionId(),
+		AccountID:          tx.GetAccountId(),
+		Date:               tx.GetDate(),
+		Amount:             tx.GetAmount(),
+		Name:               tx.GetName(),
+		MerchantName:       tx.MerchantName.Get(),
+		CategoryPrimary:    tx.GetPersonalFinanceCategory().Primary,
+		CategoryDetailed:   tx.GetPersonalFinanceCategory().Detailed,
+		CategoryConfidence: tx.GetPersonalFinanceCategory().ConfidenceLevel.Get(),
+		PaymentChannel:     tx.GetPaymentChannel(),
+		Pending:            pending,
+		RawJson:            encryptedRawJSON(tx, tx.GetTransactionId(), cfg.DBCryptKey),
 	}, nil
 }
 
@@ -175,33 +170,22 @@ func syncAllAccounts(ctx context.Context, itemID string, accessToken string, pla
 	if err != nil {
 		return fmt.Errorf("unable to request accounts from api: %w", err)
 	}
-	now := time.Now()
 	accounts := accountsGetResp.GetAccounts()
 	var operations = []sqlcgen.UpsertAccountParams{}
 	for _, pa := range accounts {
-		accID, valid := pa.GetAccountIdOk()
-		if !valid {
-			slog.Warn("discarding account with invalid account id", "item", itemID)
-			continue
-		}
-		accName, valid := pa.GetNameOk()
-		if !valid {
-			slog.Warn("discarding account with invalid account name", "account", *accID, "item", itemID)
-			continue
-		}
 		op := sqlcgen.UpsertAccountParams{
 			ItemID:           itemID,
-			AccountID:        *accID,
-			Name:             *accName,
-			Mask:             ToNullString(pa.GetMaskOk()),
-			Type:             ToNullString(pa.GetTypeOk()),
-			Subtype:          ToNullString(pa.GetSubtypeOk()),
-			BalanceAvailable: ToNullFloat64(pa.Balances.GetAvailableOk()),
-			BalanceCurrent:   ToNullFloat64(pa.Balances.GetCurrentOk()),
+			AccountID:        pa.AccountId,
+			Name:             pa.Name,
+			Mask:             pa.Mask.Get(),
+			Type:             (*string)(pa.GetType().Ptr()),
+			Subtype:          (*string)(pa.GetSubtype().Ptr()),
+			BalanceAvailable: pa.GetBalances().Available.Get(),
+			BalanceCurrent:   pa.GetBalances().Current.Get(),
 			Tracked:          1, // applies to new rows only; the upsert preserves the user's toggle on conflict
-			IsoCurrencyCode:  ToNullString(pa.Balances.GetIsoCurrencyCodeOk()),
-			LastSyncedAt:     sql.NullTime{Time: now, Valid: true},
-			RawJson:          encryptedRawJSON(pa, *accID, cfg.DBCryptKey),
+			IsoCurrencyCode:  pa.GetBalances().IsoCurrencyCode.Get(),
+			LastSyncedAt:     pa.GetBalances().LastUpdatedDatetime.Get(),
+			RawJson:          encryptedRawJSON(pa, pa.AccountId, cfg.DBCryptKey),
 		}
 		operations = append(operations, op)
 	}
@@ -223,18 +207,20 @@ func syncAllAccounts(ctx context.Context, itemID string, accessToken string, pla
 
 // encryptedRawJSON marshals v and encrypts it for at-rest storage; on failure
 // the raw payload is dropped (NULL) rather than failing the whole sync.
-func encryptedRawJSON(v json.Marshaler, id string, key []byte) sql.NullString {
+func encryptedRawJSON(v json.Marshaler, id string, key []byte) *string {
 	raw, err := v.MarshalJSON()
 	if err != nil {
 		slog.Warn("discarding raw json, marshal failed", "id", id, "err", err)
-		return sql.NullString{}
+		s := ""
+		return &s
 	}
 	enc, err := EncryptColumnSecret(string(raw), id, key)
 	if err != nil {
 		slog.Warn("discarding raw json, encryption failed", "id", id, "err", err)
-		return sql.NullString{}
+		s := ""
+		return &s
 	}
-	return sql.NullString{String: enc, Valid: true}
+	return &enc
 }
 
 func cursorValue(cursor *string) string {

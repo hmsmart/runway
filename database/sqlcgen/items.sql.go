@@ -7,7 +7,7 @@ package sqlcgen
 
 import (
 	"context"
-	"database/sql"
+	"time"
 )
 
 const createItem = `-- name: CreateItem :exec
@@ -25,10 +25,10 @@ INSERT INTO items (
 `
 
 type CreateItemParams struct {
-	ItemID          string         `json:"item_id"`
-	AccessToken     string         `json:"access_token"`
-	InstitutionName sql.NullString `json:"institution_name"`
-	Status          string         `json:"status"`
+	ItemID          string  `json:"item_id"`
+	AccessToken     string  `json:"access_token"`
+	InstitutionName *string `json:"institution_name"`
+	Status          string  `json:"status"`
 }
 
 func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) error {
@@ -42,7 +42,7 @@ func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) error {
 }
 
 const getAllItems = `-- name: GetAllItems :many
-SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at FROM items WHERE status = 'active' ORDER BY created_at DESC
+SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at, user_id FROM items WHERE status = 'active' ORDER BY created_at DESC
 `
 
 func (q *Queries) GetAllItems(ctx context.Context) ([]Item, error) {
@@ -62,6 +62,7 @@ func (q *Queries) GetAllItems(ctx context.Context) ([]Item, error) {
 			&i.Cursor,
 			&i.CreatedAt,
 			&i.LastSyncedAt,
+			&i.UserID,
 		); err != nil {
 			return nil, err
 		}
@@ -77,7 +78,7 @@ func (q *Queries) GetAllItems(ctx context.Context) ([]Item, error) {
 }
 
 const getItemByID = `-- name: GetItemByID :one
-SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at FROM items WHERE item_id = ?
+SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at, user_id FROM items WHERE item_id = ?
 `
 
 func (q *Queries) GetItemByID(ctx context.Context, itemID string) (Item, error) {
@@ -91,6 +92,7 @@ func (q *Queries) GetItemByID(ctx context.Context, itemID string) (Item, error) 
 		&i.Cursor,
 		&i.CreatedAt,
 		&i.LastSyncedAt,
+		&i.UserID,
 	)
 	return i, err
 }
@@ -100,9 +102,9 @@ UPDATE items SET cursor = ?, last_synced_at = ? WHERE item_id = ?
 `
 
 type UpdateItemCursorParams struct {
-	Cursor       sql.NullString `json:"cursor"`
-	LastSyncedAt sql.NullTime   `json:"last_synced_at"`
-	ItemID       string         `json:"item_id"`
+	Cursor       *string    `json:"cursor"`
+	LastSyncedAt *time.Time `json:"last_synced_at"`
+	ItemID       string     `json:"item_id"`
 }
 
 func (q *Queries) UpdateItemCursor(ctx context.Context, arg UpdateItemCursorParams) error {

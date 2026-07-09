@@ -7,11 +7,10 @@ package sqlcgen
 
 import (
 	"context"
-	"database/sql"
 )
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, payment_channel, pending, removed_at, amort_end, excluded, raw_json FROM transactions WHERE tx_id = ?
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json FROM transactions WHERE tx_id = ?
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
@@ -27,6 +26,7 @@ func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction,
 		&i.MerchantName,
 		&i.CategoryPrimary,
 		&i.CategoryDetailed,
+		&i.CategoryConfidence,
 		&i.PaymentChannel,
 		&i.Pending,
 		&i.RemovedAt,
@@ -78,10 +78,10 @@ func (q *Queries) SoftDeleteTransaction(ctx context.Context, plaidTxID string) e
 const upsertTransaction = `-- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, amount,
-    name, merchant_name, category_primary, category_detailed,
+    name, merchant_name, category_primary, category_detailed, category_confidence, 
     payment_channel, pending, raw_json
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     amount = excluded.amount,
@@ -89,6 +89,7 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     merchant_name = excluded.merchant_name,
     category_primary = excluded.category_primary,
     category_detailed = excluded.category_detailed,
+    category_confidence = excluded.category_confidence,
     payment_channel = excluded.payment_channel,
     pending = excluded.pending,
     removed_at = NULL,
@@ -97,18 +98,19 @@ RETURNING tx_id
 `
 
 type UpsertTransactionParams struct {
-	TxID             string         `json:"tx_id"`
-	PlaidTxID        string         `json:"plaid_tx_id"`
-	AccountID        string         `json:"account_id"`
-	Date             string         `json:"date"`
-	Amount           float64        `json:"amount"`
-	Name             sql.NullString `json:"name"`
-	MerchantName     sql.NullString `json:"merchant_name"`
-	CategoryPrimary  sql.NullString `json:"category_primary"`
-	CategoryDetailed sql.NullString `json:"category_detailed"`
-	PaymentChannel   sql.NullString `json:"payment_channel"`
-	Pending          int64          `json:"pending"`
-	RawJson          sql.NullString `json:"raw_json"`
+	TxID               string  `json:"tx_id"`
+	PlaidTxID          string  `json:"plaid_tx_id"`
+	AccountID          string  `json:"account_id"`
+	Date               string  `json:"date"`
+	Amount             float64 `json:"amount"`
+	Name               string  `json:"name"`
+	MerchantName       *string `json:"merchant_name"`
+	CategoryPrimary    string  `json:"category_primary"`
+	CategoryDetailed   string  `json:"category_detailed"`
+	CategoryConfidence *string `json:"category_confidence"`
+	PaymentChannel     string  `json:"payment_channel"`
+	Pending            int64   `json:"pending"`
+	RawJson            *string `json:"raw_json"`
 }
 
 func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) (string, error) {
@@ -122,6 +124,7 @@ func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionPa
 		arg.MerchantName,
 		arg.CategoryPrimary,
 		arg.CategoryDetailed,
+		arg.CategoryConfidence,
 		arg.PaymentChannel,
 		arg.Pending,
 		arg.RawJson,

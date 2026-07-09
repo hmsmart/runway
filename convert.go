@@ -1,56 +1,26 @@
 package main
 
 import (
-	"database/sql"
-	"fmt"
 	"strings"
-	"time"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
 
-func ToNullString[T ~string](s *T, ok bool) sql.NullString {
+// StringPtrOk converts a plaid-style (value, ok) getter result to a *string
+// suitable for sqlc's pointer-typed nullable columns.
+func StringPtrOk[T ~string](s *T, ok bool) *string {
 	if !ok || s == nil {
-		return sql.NullString{}
-	}
-	return sql.NullString{String: string(*s), Valid: true}
-}
-
-func ToNullInt64(i *int64, ok bool) sql.NullInt64 {
-	if !ok || i == nil {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: *i, Valid: true}
-}
-
-func ToNullFloat64(f *float64, ok bool) sql.NullFloat64 {
-	if !ok || f == nil {
-		return sql.NullFloat64{}
-	}
-	return sql.NullFloat64{Float64: *f, Valid: true}
-}
-
-func ToNullTime(t *time.Time, ok bool) sql.NullTime {
-	if !ok || t == nil {
-		fmt.Printf("Null Time??")
-		return sql.NullTime{}
-	}
-	fmt.Printf("At Time: %v", *t)
-	return sql.NullTime{Time: *t, Valid: ok}
-}
-
-func NullStringToPtr(ns sql.NullString) *string {
-	if !ns.Valid {
 		return nil
 	}
-	return &ns.String
+	v := string(*s)
+	return &v
 }
 
-// stringOr unwraps a NullString, falling back to a default.
-func stringOr(ns sql.NullString, fallback string) string {
-	if ns.Valid && ns.String != "" {
-		return ns.String
+// stringOr dereferences a nullable string, falling back to a default.
+func stringOr(s *string, fallback string) string {
+	if s != nil && *s != "" {
+		return *s
 	}
 	return fallback
 }

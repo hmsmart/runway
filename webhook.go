@@ -88,7 +88,7 @@ func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg
 		// request, and inFlightSyncs dedupes bursts of webhooks per item.
 		syncCtx := context.WithoutCancel(r.Context())
 		go func() {
-			if err := syncItem(syncCtx, item.ItemID, accessToken, NullStringToPtr(item.Cursor), plaidClient, store, cfg, notify); err != nil {
+			if err := syncItem(syncCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg, notify); err != nil {
 				slog.Error("webhook-triggered sync failed", "item", item.ItemID, "err", err)
 			}
 		}()

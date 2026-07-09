@@ -1,10 +1,10 @@
 -- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, amount,
-    name, merchant_name, category_primary, category_detailed,
+    name, merchant_name, category_primary, category_detailed, category_confidence, 
     payment_channel, pending, raw_json
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     amount = excluded.amount,
@@ -12,6 +12,7 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     merchant_name = excluded.merchant_name,
     category_primary = excluded.category_primary,
     category_detailed = excluded.category_detailed,
+    category_confidence = excluded.category_confidence,
     payment_channel = excluded.payment_channel,
     pending = excluded.pending,
     removed_at = NULL,
