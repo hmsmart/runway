@@ -9,34 +9,34 @@ import (
 	"log/slog"
 	"math"
 	"net/url"
-	"strconv"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/domains"
 )
 
-type Permission string
-
-const (
-	PermissionInvite Permission = "invite"
-	PermissionActive Permission = "active"
-)
+// inviteCodePattern matches a normalized invite code: 8 base32 characters,
+// uppercased with dashes stripped.
+var inviteCodePattern = regexp.MustCompile(`^[A-Z2-7]{8}$`)
 
 type TelegramBot struct {
-	bot    *bot.Bot
-	chatID int64
-	store  *database.Store
+	bot      *bot.Bot
+	chatID   int64
+	store    *database.Store
+	tokenTTL time.Duration
 }
 
-func NewTelegramBot(token string, chatID int64, store *database.Store) (*TelegramBot, error) {
+func NewTelegramBot(token string, chatID int64, store *database.Store, tokenTTL time.Duration) (*TelegramBot, error) {
 	b, err := bot.New(token)
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
-	return &TelegramBot{bot: b, chatID: chatID, store: store}, nil
+	return &TelegramBot{bot: b, chatID: chatID, store: store, tokenTTL: tokenTTL}, nil
 }
 
 // middleware wraps a handler with one cross-cutting step.
@@ -61,13 +61,13 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 		} else if update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
 			chatID = update.CallbackQuery.Message.Message.Chat.ID
 		}
-		user, err := t.store.GetUserByTelegram(ctx, &chatID)
+		row, err := t.store.GetUserByTelegram(ctx, &chatID)
 		if errors.Is(err, sql.ErrNoRows) {
 			slog.Info("user not located in database", "chatID", chatID)
 		} else if err != nil {
 			slog.Error("failed to query database for user", "chatID", chatID, "err", err)
 		}
-		next(WithUser(ctx, user), b, update)
+		next(WithUser(ctx, domains.NewUser(row)), b, update)
 	}
 }
 
@@ -77,8 +77,7 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 func (t *TelegramBot) syncCommands(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if update.Message != nil {
-			user, registered := UserFromContext(ctx)
-			if err := t.setCommandMenu(ctx, update.Message.Chat.ID, user, registered); err != nil {
+			if err := t.setCommandMenu(ctx, update.Message.Chat.ID, UserFromContext(ctx)); err != nil {
 				slog.Error("failed to set bot command menu", "chatID", update.Message.Chat.ID, "err", err)
 			}
 		}
@@ -88,13 +87,17 @@ func (t *TelegramBot) syncCommands(next bot.HandlerFunc) bot.HandlerFunc {
 
 // requirePermission stops the chain unless the context user is active and,
 // for permissions beyond PermissionActive, holds that grant too.
-func (t *TelegramBot) requirePermission(perm Permission) middleware {
+// PermissionUnregistered inverts the check: only users with no database row
+// pass, so registered users can't re-run registration.
+func (t *TelegramBot) requirePermission(perm domains.Permission) middleware {
 	return func(next bot.HandlerFunc) bot.HandlerFunc {
 		return func(ctx context.Context, b *bot.Bot, update *models.Update) {
-			user, ok := UserFromContext(ctx)
-			allowed := ok && user.Active
-			if perm == PermissionInvite {
-				allowed = allowed && user.CanInvite
+			user := UserFromContext(ctx)
+			var allowed bool
+			if perm == domains.PermissionUnregistered {
+				allowed = user == nil
+			} else {
+				allowed = user.Has(domains.PermissionActive) && user.Has(perm)
 			}
 			if !allowed {
 				slog.Info("update rejected", "perm", perm)
@@ -142,16 +145,19 @@ func (t *TelegramBot) RegisterHandlers() {
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/ping", bot.MatchTypeExact,
 		chain(t.handlePing, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
-		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(PermissionActive)))
+		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/register", bot.MatchTypePrefix,
+		chain(t.handleRegistration, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionUnregistered)))
 
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "menu:", bot.MatchTypePrefix,
-		chain(t.handleMenu, t.fetchUser, t.requirePermission(PermissionActive)))
+		chain(t.handleMenu, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "exclude:", bot.MatchTypePrefix,
-		chain(t.handleExclude("exclude:", 1, "Excluded from spend"), t.fetchUser, t.requirePermission(PermissionActive)))
+		chain(t.handleExclude("exclude:", 1, "Excluded from spend"), t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "include:", bot.MatchTypePrefix,
-		chain(t.handleExclude("include:", 0, "Included in spend"), t.fetchUser, t.requirePermission(PermissionActive)))
+		chain(t.handleExclude("include:", 0, "Included in spend"), t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "amort:", bot.MatchTypePrefix,
-		chain(t.handleAmortize, t.fetchUser, t.requirePermission(PermissionActive)))
+		chain(t.handleAmortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 }
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -159,27 +165,120 @@ func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *model
 }
 
 func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models.Update) {
-	_, ok := UserFromContext(ctx)
-	slog.Info("called ping", "chatID", update.Message.Chat.ID, "registered", ok)
-	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   "Pong",
-	})
+	user := UserFromContext(ctx)
+	slog.Info("called ping", "chatID", update.Message.Chat.ID, "registered", user != nil)
+	var err error
+	if user == nil {
+		_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Unpongthenticated",
+		})
+	} else {
+		_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Pongthenticated",
+		})
+	}
 	if err != nil {
 		slog.Error("failed to send pong", "chatID", update.Message.Chat.ID, "err", err)
 	}
 }
 
+func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update *models.Update) {
+	parts := strings.Fields(update.Message.Text)
+	if len(parts) != 2 {
+		slog.Info("invalid arguments passed", "chatID", update.Message.Chat.ID, "message", update.Message.Text)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "To register enter /register followed by your registration code (ABCD-2234 or ABCD2234)",
+		})
+		if err != nil {
+			slog.Error("failed to send denial message", "chatID", update.Message.Chat.ID, "err", err)
+		}
+		return
+	}
+	regcode := strings.ToUpper(parts[1])
+	regcode = strings.ReplaceAll(regcode, "-", "")
+	if !inviteCodePattern.MatchString(regcode) {
+		slog.Info("failed to validate code", "chatID", update.Message.Chat.ID, "code", regcode)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "I could not validate your registration code.",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
+		}
+		return
+	}
+	slog.Info("got valid registration code request, checking db", "chatID", update.Message.Chat.ID, "code", regcode)
+	var rows int64
+	res, err := t.store.RedeemInviteCode(ctx, sqlcgen.RedeemInviteCodeParams{
+		TgID:       &update.Message.Chat.ID,
+		InviteCode: regcode,
+	})
+	if err == nil {
+		rows, err = res.RowsAffected()
+	}
+	if err != nil {
+		slog.Error("failed to redeem invite code", "chatID", update.Message.Chat.ID, "code", regcode, "err", err)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "I experienced a temporary error during registration, try again later.",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
+		}
+		return
+	}
+	if rows != 1 {
+		slog.Info("invalid or used code provided", "chatID", update.Message.Chat.ID, "code", regcode)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "This registration code either doesn't exist or has been redeemed already.",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
+		}
+		return
+	}
+	// chain only builds a handler; call it to run. fetchUser reloads the
+	// now-registered user so syncCommands writes the active command menu
+	// before the welcome message goes out.
+	welcome := func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		slog.Info("registration successful", "chatID", update.Message.Chat.ID, "code", regcode)
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Welcome to runway! Now that you are registered, use /link to generate a plaid link code",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
+		}
+	}
+	chain(welcome, t.fetchUser, t.syncCommands)(ctx, b, update)
+}
+
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
-	token := t.store.Tokens.GenerateToken()
+	user := UserFromContext(ctx)
+	if user == nil {
+		slog.Error("something happened where a user was allowed to /link without proper context")
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "I experienced a temporary error during link, try again later.",
+		})
+		if err != nil {
+			slog.Error("failed to send message", "chatID", update.Message.Chat.ID, "err", err)
+		}
+		return
+	}
+	token := RandomToken(16)
+	t.store.TGTokens.Set(token, *user, t.tokenTTL)
 	params := url.Values{}
 	params.Set("token", token)
-	params.Set("tgid", strconv.FormatInt(update.Message.Chat.ID, 10))
 	linkURL := "https://gpws.kawaiide.su/link?" + params.Encode()
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: update.Message.Chat.ID,
-		Text:   formatLinkMessage(),
+		Text:   formatLinkMessage(t.tokenTTL),
 		ReplyMarkup: &models.InlineKeyboardMarkup{
 			InlineKeyboard: [][]models.InlineKeyboardButton{{
 				{Text: "🔗 Link Account", URL: linkURL},
@@ -258,18 +357,19 @@ func (t *TelegramBot) handleAmortize(ctx context.Context, b *bot.Bot, update *mo
 	t.answerCallback(ctx, b, update, "Amortizing over "+period.label)
 }
 
-// setCommandMenu writes the command menu a user should see given their state.
-// Unregistered and inactive users get register only.
-func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user sqlcgen.User, registered bool) error {
+// setCommandMenu writes the command menu a user should see given their
+// permissions. Unregistered (nil) and inactive users get ping and register.
+func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *domains.User) error {
 	cmds := []models.BotCommand{
-		{Command: "register", Description: "Register with Runway"},
+		{Command: "ping", Description: "Ping Runway Service"},
+		{Command: "register", Description: "Register with Runway using a shared token"},
 	}
-	if registered && user.Active {
+	if user.Has(domains.PermissionActive) {
 		cmds = []models.BotCommand{
 			{Command: "ping", Description: "Ping Runway Service"},
 			{Command: "link", Description: "Link account"},
 		}
-		if user.CanInvite {
+		if user.Has(domains.PermissionInvite) {
 			cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Invite a user to runway"})
 		}
 	}
@@ -405,11 +505,25 @@ func transactionFromParams(p sqlcgen.UpsertTransactionParams) sqlcgen.Transactio
 	}
 }
 
-func formatLinkMessage() string {
+func formatLinkMessage(ttl time.Duration) string {
 	return fmt.Sprintf(
-		"🔗 <b>Connect Your Bank Account</b>\n\n" +
-			"Tap the link below to securely connect your account through Plaid. " +
-			"This link is <b>single-use</b> and expires in 30 minutes.\n\n")
+		"🔗 <b>Connect Your Bank Account</b>\n\n"+
+			"Tap the link below to securely connect your account through Plaid. "+
+			"This link is <b>single-use</b> and expires in %s.\n\n", humanDuration(ttl))
+}
+
+// humanDuration renders a duration for user-facing text, e.g. "30 minutes".
+func humanDuration(d time.Duration) string {
+	if d >= time.Hour && d%time.Hour == 0 {
+		if h := int(d / time.Hour); h != 1 {
+			return fmt.Sprintf("%d hours", h)
+		}
+		return "1 hour"
+	}
+	if m := int(d / time.Minute); m != 1 {
+		return fmt.Sprintf("%d minutes", m)
+	}
+	return "1 minute"
 }
 
 func formatTransactionMessage(tx sqlcgen.Transaction) string {

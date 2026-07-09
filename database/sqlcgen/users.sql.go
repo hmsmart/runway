@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
 
 const getUserByTelegram = `-- name: GetUserByTelegram :one
@@ -27,4 +28,19 @@ func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, err
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const redeemInviteCode = `-- name: RedeemInviteCode :execresult
+UPDATE users
+SET tg_id = ?, active = 1
+WHERE invite_code = ? AND tg_id IS NULL
+`
+
+type RedeemInviteCodeParams struct {
+	TgID       *int64 `json:"tg_id"`
+	InviteCode string `json:"invite_code"`
+}
+
+func (q *Queries) RedeemInviteCode(ctx context.Context, arg RedeemInviteCodeParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, redeemInviteCode, arg.TgID, arg.InviteCode)
 }

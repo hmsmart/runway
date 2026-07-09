@@ -76,3 +76,9 @@ func DecryptColumnSecret(encryptedText string, primaryKey string, key []byte) (s
 
 	return string(plaintext), nil
 }
+
+func RandomToken(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return base64.StdEncoding.EncodeToString(b)
+}

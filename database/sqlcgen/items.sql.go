@@ -13,10 +13,12 @@ import (
 const createItem = `-- name: CreateItem :exec
 INSERT INTO items (
     item_id,
+    user_id,
     access_token,
     institution_name,
     status
 ) VALUES (
+    ?,
     ?,
     ?,
     ?,
@@ -26,6 +28,7 @@ INSERT INTO items (
 
 type CreateItemParams struct {
 	ItemID          string  `json:"item_id"`
+	UserID          string  `json:"user_id"`
 	AccessToken     string  `json:"access_token"`
 	InstitutionName *string `json:"institution_name"`
 	Status          string  `json:"status"`
@@ -34,6 +37,7 @@ type CreateItemParams struct {
 func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) error {
 	_, err := q.db.ExecContext(ctx, createItem,
 		arg.ItemID,
+		arg.UserID,
 		arg.AccessToken,
 		arg.InstitutionName,
 		arg.Status,

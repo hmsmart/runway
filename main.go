@@ -33,7 +33,7 @@ func main() {
 func run(ctx context.Context) error {
 	cfg := LoadSettings()
 
-	store, err := database.GetStore(ctx, cfg.DBPath)
+	store, err := database.GetStore(ctx, cfg.DBPath, cfg.TokenTTL)
 	if err != nil {
 		return fmt.Errorf("failed to open databse: %w", err)
 	}
@@ -43,7 +43,7 @@ func run(ctx context.Context) error {
 
 	//Connect to Telegram
 
-	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId, store)
+	tg, err := NewTelegramBot(cfg.TGBotKey, cfg.TGChatId, store, cfg.TokenTTL)
 	if err != nil {
 		return fmt.Errorf("starting telegram: %w", err)
 	}
