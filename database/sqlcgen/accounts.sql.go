@@ -93,11 +93,8 @@ ON CONFLICT(account_id) DO UPDATE SET
   balance_available = excluded.balance_available,
   balance_current = excluded.balance_current,
   iso_currency_code = excluded.iso_currency_code,
-  last_synced_at = COALESCE(excluded.last_synced_at, accounts.last_synced_at),
+  last_synced_at = excluded.last_synced_at,
   raw_json = excluded.raw_json
-WHERE excluded.last_synced_at IS NULL
-   OR accounts.last_synced_at IS NULL
-   OR excluded.last_synced_at > accounts.last_synced_at
 `
 
 type UpsertAccountParams struct {
@@ -115,9 +112,6 @@ type UpsertAccountParams struct {
 	RawJson          *string    `json:"raw_json"`
 }
 
-// Skip only when the incoming snapshot is provably older. Plaid omits
-// last_updated_datetime for many institutions, so a NULL timestamp still
-// means freshly fetched data and must not freeze the row.
 func (q *Queries) UpsertAccount(ctx context.Context, arg UpsertAccountParams) error {
 	_, err := q.db.ExecContext(ctx, upsertAccount,
 		arg.AccountID,

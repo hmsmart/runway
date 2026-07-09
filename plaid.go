@@ -171,6 +171,10 @@ func syncAllAccounts(ctx context.Context, itemID string, accessToken string, pla
 		return fmt.Errorf("unable to request accounts from api: %w", err)
 	}
 	accounts := accountsGetResp.GetAccounts()
+	// last_synced_at records when we synced, not the institution-side balance
+	// timestamp — Plaid omits that for most institutions, and each AccountsGet
+	// response is current by definition. The raw payload keeps Plaid's value.
+	now := time.Now()
 	var operations = []sqlcgen.UpsertAccountParams{}
 	for _, pa := range accounts {
 		op := sqlcgen.UpsertAccountParams{
@@ -184,7 +188,7 @@ func syncAllAccounts(ctx context.Context, itemID string, accessToken string, pla
 			BalanceCurrent:   pa.GetBalances().Current.Get(),
 			Tracked:          1, // applies to new rows only; the upsert preserves the user's toggle on conflict
 			IsoCurrencyCode:  pa.GetBalances().IsoCurrencyCode.Get(),
-			LastSyncedAt:     pa.GetBalances().LastUpdatedDatetime.Get(),
+			LastSyncedAt:     &now,
 			RawJson:          encryptedRawJSON(pa, pa.AccountId, cfg.DBCryptKey),
 		}
 		operations = append(operations, op)
