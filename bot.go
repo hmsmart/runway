@@ -189,6 +189,12 @@ var amortPeriods = map[string]struct {
 	"1y": {"+1 year", "1 year"},
 }
 
+var dayShiftPeriods = map[string]int{
+	"3d": -3,
+	"2d": -2,
+	"1d": -1,
+}
+
 // RegisterHandlers wires each update to its middleware chain. Every chain
 // starts with fetchUser; message commands then sync the command menu, and
 // anything that touches data requires an active user.
@@ -231,6 +237,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleExclude("include:", 0, "Included in spend"), t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "amort:", bot.MatchTypePrefix,
 		chain(t.handleAmortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "shift:", bot.MatchTypePrefix,
+		chain(t.handleDayshift, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "mortize:", bot.MatchTypePrefix,
 		chain(t.handleMortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "unlink:", bot.MatchTypePrefix,
@@ -517,6 +525,20 @@ func (t *TelegramBot) handleMenu(ctx context.Context, b *bot.Bot, update *models
 			return
 		}
 		t.swapKeyboard(ctx, b, update, amortizeKeyboard(txID, tx.AmortEnd != nil))
+	case "shift":
+		tx, err := t.store.GetTransaction(ctx, txID)
+		if err != nil {
+			slog.Error("failed to load transaction for dayshift menu", "tx", txID, "err", err)
+			t.answerCallback(ctx, b, update, "Something went wrong")
+			return
+		}
+		txDate, err := time.Parse("2006-01-02", tx.Date)
+		if err != nil {
+			slog.Error("failed to parse date for transaction", "tx", txID, "err", err)
+			t.answerCallback(ctx, b, update, "Something went wrong")
+			return
+		}
+		t.swapKeyboard(ctx, b, update, dayshiftKeyboard(txID, txDate))
 	case "main":
 		// The main keyboard depends on the row's excluded state, so
 		// rebuild the whole message from the database.
@@ -561,6 +583,45 @@ func (t *TelegramBot) handleExclude(prefix string, excluded int64, toast string)
 		t.refreshMessage(ctx, b, update, txID)
 		t.answerCallback(ctx, b, update, toast)
 	}
+}
+
+func (t *TelegramBot) handleDayshift(ctx context.Context, b *bot.Bot, update *models.Update) {
+	parts := strings.SplitN(update.CallbackQuery.Data, ":", 3)
+	if len(parts) != 3 {
+		t.answerCallback(ctx, b, update, "Something went wrong")
+		return
+	}
+	period, ok := dayShiftPeriods[parts[1]]
+	txID := parts[2]
+	if !ok {
+		t.answerCallback(ctx, b, update, "Something went wrong")
+		return
+	}
+	tx, err := t.store.GetTransaction(ctx, txID)
+	if err != nil {
+		slog.Error("failed to determine shift for transaction", "tx", txID, "err", err)
+		t.answerCallback(ctx, b, update, "Something went wrong")
+		return
+	}
+	txDate, err := time.Parse("2006-01-02", tx.Date)
+	if err != nil {
+		slog.Error("failed to parse transaction date", "tx", txID, "err", err)
+		t.answerCallback(ctx, b, update, "Something went wrong")
+		return
+	}
+	shiftDate := txDate.AddDate(0, 0, period)
+	err = t.store.SetTxDate(ctx, sqlcgen.SetTxDateParams{
+		TxID: txID,
+		Date: shiftDate.Format("2006-01-02"),
+	})
+	if err != nil {
+		slog.Error("failed to update transaction", "tx", txID, "err", err)
+		t.answerCallback(ctx, b, update, "Something went wrong")
+		return
+	}
+	t.recomputeSpend(ctx)
+	t.refreshMessage(ctx, b, update, txID)
+	t.answerCallback(ctx, b, update, fmt.Sprintf("Moving transaction to %s", txDate.Format("Mon Jan 2")))
 }
 
 func (t *TelegramBot) handleAmortize(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -814,8 +875,32 @@ func transactionKeyboard(txID string, excluded bool) models.InlineKeyboardMarkup
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
 				{Text: "📊 Spread", CallbackData: "menu:amort:" + txID},
+				{Text: "⬅️ Shift", CallbackData: "menu:shift:" + txID},
 				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
 			},
+		},
+	}
+}
+
+// dayshiftKeyboard is the second-level menu shown after tapping Shift.
+// The period row always shows so a mis-tapped period can be corrected by
+// tapping again; Unshift (clear) only appears once the row is spread.
+func dayshiftKeyboard(txID string, txDate time.Time) models.InlineKeyboardMarkup {
+	bottom := []models.InlineKeyboardButton{
+		{Text: "⬅️ Back", CallbackData: "menu:main:" + txID},
+	}
+	datefmt := "Mon Jan 2"
+	threeDaysAgo := txDate.AddDate(0, 0, -3)
+	twoDaysAgo := txDate.AddDate(0, 0, -2)
+	oneDayAgo := txDate.AddDate(0, 0, -1)
+	return models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: threeDaysAgo.Format(datefmt), CallbackData: "shift:3d:" + txID},
+				{Text: twoDaysAgo.Format(datefmt), CallbackData: "shift:2d:" + txID},
+				{Text: oneDayAgo.Format(datefmt), CallbackData: "shift:1d:" + txID},
+			},
+			bottom,
 		},
 	}
 }

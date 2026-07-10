@@ -41,3 +41,6 @@ __debug_*
 
 # Task runner checksums
 .task/
+
+# CSV Import Space
+import/

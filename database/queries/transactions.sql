@@ -71,3 +71,6 @@ UPDATE transactions SET amort_end = date("date", CAST(sqlc.arg(modifier) AS TEXT
 
 -- name: ClearAmortEnd :exec
 UPDATE transactions SET amort_end = NULL WHERE tx_id = ?;
+
+-- name: SetTxDate :exec
+UPDATE transactions SET date = ? WHERE tx_id = sqlc.arg(tx_id);

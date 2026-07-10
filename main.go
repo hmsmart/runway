@@ -26,6 +26,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// `runway seed` is a dev tool, not a server mode: it loads a CSV of real
+	// spending as a fudged Plaid item so the EMA math can be checked against
+	// genuine data, then exits.
+	if len(os.Args) > 1 && os.Args[1] == "seed" {
+		if err := runSeed(ctx, os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	if err := run(ctx); err != nil {
 		log.Fatal(err)
 	}
@@ -97,6 +107,10 @@ func run(ctx context.Context) error {
 			return
 		}
 		for _, item := range items {
+			// Seeded items have no Plaid side to sync.
+			if item.AccessToken == seedAccessToken {
+				continue
+			}
 			accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
 			if err != nil {
 				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)

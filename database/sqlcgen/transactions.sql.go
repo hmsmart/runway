@@ -213,6 +213,20 @@ func (q *Queries) SetExcluded(ctx context.Context, arg SetExcludedParams) error 
 	return err
 }
 
+const setTxDate = `-- name: SetTxDate :exec
+UPDATE transactions SET date = ? WHERE tx_id = ?2
+`
+
+type SetTxDateParams struct {
+	Date string `json:"date"`
+	TxID string `json:"tx_id"`
+}
+
+func (q *Queries) SetTxDate(ctx context.Context, arg SetTxDateParams) error {
+	_, err := q.db.ExecContext(ctx, setTxDate, arg.Date, arg.TxID)
+	return err
+}
+
 const softDeleteTransaction = `-- name: SoftDeleteTransaction :exec
 UPDATE transactions SET removed_at = datetime('now')
 WHERE plaid_tx_id = ?

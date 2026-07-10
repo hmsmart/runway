@@ -169,6 +169,8 @@ func (t *TelegramBot) handleUnlinkCallback(ctx context.Context, b *bot.Bot, upda
 		return
 	}
 	slog.Info("item unlinked", "item", itemID, "chatID", user.TelegramID())
+	// The unlinked item's transactions are gone, so the spend series changed.
+	t.recomputeSpend(ctx)
 	t.editCallbackMessage(ctx, b, update, fmt.Sprintf("🔌 Unlinked <b>%s</b> and deleted its data.", inst))
 	t.answerCallback(ctx, b, update, "Unlinked")
 }
@@ -236,16 +238,20 @@ func (t *TelegramBot) handleUnregisterCallback(ctx context.Context, b *bot.Bot, 
 // removeItem disconnects the item at Plaid, then deletes its local data.
 // Plaid removal goes first: if it fails we keep our rows so the user can
 // retry, instead of orphaning a live token we no longer have a record of.
+// Seeded items (dev CSV imports) have no Plaid side, so they skip straight
+// to the local delete.
 func (t *TelegramBot) removeItem(ctx context.Context, item sqlcgen.Item) error {
-	accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, t.cfg.DBCryptKey)
-	if err != nil {
-		return fmt.Errorf("decrypt access token: %w", err)
-	}
-	callCtx, cancel := context.WithTimeout(ctx, t.cfg.PlaidTimeout)
-	defer cancel()
-	req := plaid.NewItemRemoveRequest(accessToken)
-	if _, _, err := t.plaid.PlaidApi.ItemRemove(callCtx).ItemRemoveRequest(*req).Execute(); err != nil {
-		return fmt.Errorf("plaid item remove: %w", err)
+	if item.AccessToken != seedAccessToken {
+		accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, t.cfg.DBCryptKey)
+		if err != nil {
+			return fmt.Errorf("decrypt access token: %w", err)
+		}
+		callCtx, cancel := context.WithTimeout(ctx, t.cfg.PlaidTimeout)
+		defer cancel()
+		req := plaid.NewItemRemoveRequest(accessToken)
+		if _, _, err := t.plaid.PlaidApi.ItemRemove(callCtx).ItemRemoveRequest(*req).Execute(); err != nil {
+			return fmt.Errorf("plaid item remove: %w", err)
+		}
 	}
 	return t.store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
 		if err := q.DeleteTransactionsByItem(ctx, item.ItemID); err != nil {
