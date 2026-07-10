@@ -116,6 +116,24 @@ func run(ctx context.Context) error {
 		}
 	}()
 
+	// Hourly daily-spend sweep. Syncs and classification taps recompute the
+	// series themselves; this exists so it still rolls over at midnight
+	// (today's zero-spend row, EMA decay) on days with no other activity.
+	// Hourly rather than a midnight timer keeps it timezone-shift-proof and
+	// costs nothing: the recompute is idempotent over tiny data.
+	go func() {
+		tick := time.NewTicker(time.Hour)
+		defer tick.Stop()
+		for {
+			recomputeAllDailySpend(ctx, store)
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+
 	select {
 	case err := <-srvErr:
 		return fmt.Errorf("http server: %w", err)

@@ -4,6 +4,10 @@ SELECT * FROM accounts WHERE account_id = ? AND item_id = ?;
 SELECT * FROM accounts WHERE tracked = 1 ORDER BY created_at DESC;
 -- name: ListAccountsByItem :many
 SELECT * FROM accounts WHERE item_id = ? ORDER BY name ASC;
+-- name: ListTrackedAccountsByUser :many
+SELECT a.* FROM accounts a
+JOIN items i ON i.item_id = a.item_id
+WHERE i.user_id = ? AND a.tracked = 1;
 -- name: DeleteAccountsByItem :exec
 DELETE FROM accounts WHERE item_id = ?;
 -- name: UpsertAccount :exec

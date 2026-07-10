@@ -36,6 +36,15 @@ func syncItem(ctx context.Context, itemID string, accessToken string, cursor *st
 	if err := syncTransactions(ctx, itemID, accessToken, cursor, plaidClient, store, cfg); err != nil {
 		return fmt.Errorf("sync transactions: %w", err)
 	}
+	// The daily-spend series derives from transactions, so refresh it after
+	// every sync, whichever trigger (webhook, startup sweep, post-link) fired.
+	item, err := store.GetItemByID(ctx, itemID)
+	if err != nil {
+		return fmt.Errorf("load item for spend recompute: %w", err)
+	}
+	if err := recomputeDailySpend(ctx, store, item.UserID); err != nil {
+		return fmt.Errorf("recompute daily spend: %w", err)
+	}
 	return nil
 }
 

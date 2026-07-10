@@ -87,6 +87,33 @@ func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, err
 	return i, err
 }
 
+const listActiveUserIDs = `-- name: ListActiveUserIDs :many
+SELECT id FROM users WHERE active = 1
+`
+
+func (q *Queries) ListActiveUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listActiveUserIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const redeemInviteCode = `-- name: RedeemInviteCode :execresult
 UPDATE users
 SET tg_id = ?, active = 1

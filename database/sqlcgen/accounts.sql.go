@@ -131,6 +131,49 @@ func (q *Queries) ListAccountsByItem(ctx context.Context, itemID string) ([]Acco
 	return items, nil
 }
 
+const listTrackedAccountsByUser = `-- name: ListTrackedAccountsByUser :many
+SELECT a.account_id, a.item_id, a.name, a.mask, a.balance_available, a.balance_current, a.iso_currency_code, a.type, a.subtype, a.raw_json, a.created_at, a.last_synced_at, a.tracked FROM accounts a
+JOIN items i ON i.item_id = a.item_id
+WHERE i.user_id = ? AND a.tracked = 1
+`
+
+func (q *Queries) ListTrackedAccountsByUser(ctx context.Context, userID string) ([]Account, error) {
+	rows, err := q.db.QueryContext(ctx, listTrackedAccountsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Account{}
+	for rows.Next() {
+		var i Account
+		if err := rows.Scan(
+			&i.AccountID,
+			&i.ItemID,
+			&i.Name,
+			&i.Mask,
+			&i.BalanceAvailable,
+			&i.BalanceCurrent,
+			&i.IsoCurrencyCode,
+			&i.Type,
+			&i.Subtype,
+			&i.RawJson,
+			&i.CreatedAt,
+			&i.LastSyncedAt,
+			&i.Tracked,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertAccount = `-- name: UpsertAccount :exec
 INSERT INTO accounts (account_id, item_id, name, mask, type, subtype, balance_available, balance_current, iso_currency_code, tracked, last_synced_at, raw_json)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

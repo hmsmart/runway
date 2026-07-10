@@ -25,12 +25,11 @@ type Account struct {
 }
 
 type DailySpend struct {
-	Date         string   `json:"date"`
-	AccountID    string   `json:"account_id"`
-	Spend        float64  `json:"spend"`
-	SettledSpend float64  `json:"settled_spend"`
-	Ema14        *float64 `json:"ema_14"`
-	Ema28        *float64 `json:"ema_28"`
+	Date   string   `json:"date"`
+	UserID string   `json:"user_id"`
+	Spend  float64  `json:"spend"`
+	Ema14  *float64 `json:"ema_14"`
+	Ema28  *float64 `json:"ema_28"`
 }
 
 type Item struct {

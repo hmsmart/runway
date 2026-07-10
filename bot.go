@@ -201,6 +201,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleHelp, t.fetchUser, t.syncCommands))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/budget", bot.MatchTypePrefix,
 		chain(t.handleBudget, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/runway", bot.MatchTypeExact,
+		chain(t.handleRunway, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/accounts", bot.MatchTypeExact,
@@ -286,6 +288,7 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"Once your budget is set, <code>/link</code> unlocks so you can connect a bank account."
 	default:
 		text = "🧭 <b>Runway commands</b>\n\n" +
+			"<code>/runway</code> — today's spend, your daily rates, and days of cash left\n" +
 			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
 			"<code>/link</code> — connect a bank account\n" +
 			"<code>/accounts</code> — list your linked accounts and balances\n" +
@@ -525,6 +528,20 @@ func (t *TelegramBot) handleMenu(ctx context.Context, b *bot.Bot, update *models
 	t.answerCallback(ctx, b, update, "")
 }
 
+// recomputeSpend refreshes the context user's daily-spend series after a
+// classification change (exclude/include, spread/unspread). Failures are
+// logged, not surfaced: the classification itself already committed, and the
+// next sync or hourly sweep will recompute the same series.
+func (t *TelegramBot) recomputeSpend(ctx context.Context) {
+	user := UserFromContext(ctx)
+	if user == nil {
+		return
+	}
+	if err := recomputeDailySpend(ctx, t.store, user.ID()); err != nil {
+		slog.Error("failed to recompute daily spend", "user", user.ID(), "err", err)
+	}
+}
+
 // handleExclude builds the exclude:/include: handler; the two differ only in
 // the flag written and the toast. The refreshed keyboard offers whichever
 // action applies to the row's new state.
@@ -540,6 +557,7 @@ func (t *TelegramBot) handleExclude(prefix string, excluded int64, toast string)
 			t.answerCallback(ctx, b, update, "Something went wrong")
 			return
 		}
+		t.recomputeSpend(ctx)
 		t.refreshMessage(ctx, b, update, txID)
 		t.answerCallback(ctx, b, update, toast)
 	}
@@ -566,6 +584,7 @@ func (t *TelegramBot) handleAmortize(ctx context.Context, b *bot.Bot, update *mo
 		t.answerCallback(ctx, b, update, "Something went wrong")
 		return
 	}
+	t.recomputeSpend(ctx)
 	t.refreshMessage(ctx, b, update, txID)
 	t.answerCallback(ctx, b, update, "Spreading over "+period.label)
 }
@@ -578,6 +597,7 @@ func (t *TelegramBot) handleMortize(ctx context.Context, b *bot.Bot, update *mod
 		t.answerCallback(ctx, b, update, "Something went wrong")
 		return
 	}
+	t.recomputeSpend(ctx)
 	t.refreshMessage(ctx, b, update, txID)
 	t.answerCallback(ctx, b, update, "Spread removed")
 }
@@ -602,6 +622,7 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 		// commands themselves still work if typed — this only trims the menu.
 		if user.Discretionary() != nil {
 			cmds = append(cmds,
+				models.BotCommand{Command: "runway", Description: "Today's spend and days of cash left"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},
 				models.BotCommand{Command: "unlink", Description: "List accounts, or unlink one by number"},
