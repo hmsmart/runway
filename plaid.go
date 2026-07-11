@@ -109,8 +109,35 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 			if err != nil {
 				return err
 			}
+			// A settled transaction that names its pending predecessor adopts
+			// that row in place (see AdoptPendingTransaction) instead of
+			// inserting a duplicate; the later "removed" event for the pending
+			// id then no-ops. Zero rows adopted (no pending sibling, or the
+			// posted id already has a row) falls through to the plain upsert.
+			if pid, ok := tx.GetPendingTransactionIdOk(); ok && pid != nil && *pid != "" {
+				res, err := q.AdoptPendingTransaction(ctx, adoptParams(params, *pid))
+				if err != nil {
+					return fmt.Errorf("adopt pending transaction %s: %w", *pid, err)
+				}
+				if n, err := res.RowsAffected(); err == nil && n == 1 {
+					slog.Info("adopted pending transaction", "pending", *pid, "posted", params.PlaidTxID)
+					continue
+				}
+			}
 			if _, err := q.UpsertTransaction(ctx, params); err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
+			}
+			// Replay recovery: the posted row existed (so adoption skipped),
+			// Plaid sent no authorized date, but the pending sibling may
+			// still hold the real transaction date.
+			if pid, ok := tx.GetPendingTransactionIdOk(); ok && pid != nil && *pid != "" && params.AuthorizedDate == nil {
+				err := q.BackfillAuthorizedDate(ctx, sqlcgen.BackfillAuthorizedDateParams{
+					PendingPlaidID: *pid,
+					PostedPlaidID:  params.PlaidTxID,
+				})
+				if err != nil {
+					return fmt.Errorf("backfill authorized date %s: %w", params.PlaidTxID, err)
+				}
 			}
 		}
 		for _, tx := range resp.GetRemoved() {
@@ -140,6 +167,25 @@ func suppressBackfill(ctx context.Context, itemID string, store *database.Store)
 	return n > 1, nil
 }
 
+// adoptParams maps an upsert's fields onto the adopt query, plus the pending
+// row being claimed.
+func adoptParams(p sqlcgen.UpsertTransactionParams, pendingPlaidID string) sqlcgen.AdoptPendingTransactionParams {
+	return sqlcgen.AdoptPendingTransactionParams{
+		PostedPlaidID:      p.PlaidTxID,
+		Date:               p.Date,
+		AuthorizedDate:     p.AuthorizedDate,
+		Amount:             p.Amount,
+		Name:               p.Name,
+		MerchantName:       p.MerchantName,
+		CategoryPrimary:    p.CategoryPrimary,
+		CategoryDetailed:   p.CategoryDetailed,
+		CategoryConfidence: p.CategoryConfidence,
+		PaymentChannel:     p.PaymentChannel,
+		RawJson:            p.RawJson,
+		PendingPlaidID:     pendingPlaidID,
+	}
+}
+
 func transactionParams(tx plaid.Transaction, cfg *Config, notified int64) (sqlcgen.UpsertTransactionParams, error) {
 	var pending int64
 	if tx.GetPending() {
@@ -154,6 +200,7 @@ func transactionParams(tx plaid.Transaction, cfg *Config, notified int64) (sqlcg
 		PlaidTxID:          tx.GetTransactionId(),
 		AccountID:          tx.GetAccountId(),
 		Date:               tx.GetDate(),
+		AuthorizedDate:     StringPtrOk(tx.GetAuthorizedDateOk()),
 		Amount:             tx.GetAmount(),
 		Name:               tx.GetName(),
 		MerchantName:       tx.MerchantName.Get(),

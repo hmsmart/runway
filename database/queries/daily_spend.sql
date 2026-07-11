@@ -1,11 +1,12 @@
 -- name: ListSpendTransactionsByUser :many
 -- The raw material for the daily-spend series: every transaction that counts
--- against the user's budget. Credits (amount < 0) stay out because deposits
--- and refunds land in checking accounts and would swamp the spend signal.
--- Untracked accounts are excluded so the tracked toggle means something once
--- it gets a UI. (ASCII only: sqlc miscounts multibyte chars in comments and
--- truncates the tail of the generated query.)
-SELECT t.date, t.amount, t.amort_end
+-- against the user's budget. The authorized (swipe) date wins over the posted
+-- date when Plaid provides it: spend belongs to the day the card was used.
+-- Credits (amount < 0) stay out because deposits and refunds land in checking
+-- accounts and would swamp the spend signal. Untracked accounts are excluded
+-- so the tracked toggle means something once it gets a UI. (ASCII only: sqlc
+-- miscounts multibyte chars in comments and truncates the generated query.)
+SELECT CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date, t.amount, t.amort_end
 FROM transactions t
 JOIN accounts a ON a.account_id = t.account_id
 JOIN items i ON i.item_id = a.item_id

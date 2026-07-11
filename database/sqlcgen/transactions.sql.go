@@ -7,7 +7,94 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
 )
+
+const adoptPendingTransaction = `-- name: AdoptPendingTransaction :execresult
+UPDATE transactions SET
+    plaid_tx_id = ?1,
+    date = ?2,
+    authorized_date = COALESCE(?3, authorized_date, date),
+    amount = ?4,
+    name = ?5,
+    merchant_name = ?6,
+    category_primary = ?7,
+    category_detailed = ?8,
+    category_confidence = ?9,
+    payment_channel = ?10,
+    pending = 0,
+    removed_at = NULL,
+    raw_json = ?11
+WHERE transactions.plaid_tx_id = ?12
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
+`
+
+type AdoptPendingTransactionParams struct {
+	PostedPlaidID      string  `json:"posted_plaid_id"`
+	Date               string  `json:"date"`
+	AuthorizedDate     *string `json:"authorized_date"`
+	Amount             float64 `json:"amount"`
+	Name               string  `json:"name"`
+	MerchantName       *string `json:"merchant_name"`
+	CategoryPrimary    string  `json:"category_primary"`
+	CategoryDetailed   string  `json:"category_detailed"`
+	CategoryConfidence *string `json:"category_confidence"`
+	PaymentChannel     string  `json:"payment_channel"`
+	RawJson            *string `json:"raw_json"`
+	PendingPlaidID     string  `json:"pending_plaid_id"`
+}
+
+// When a pending transaction settles, Plaid removes the pending row and sends
+// the posted version under a new id, with pending_transaction_id pointing at
+// the old one. Adopting rewrites the pending row in place instead of
+// insert-plus-soft-delete: the internal tx_id survives, so chat message
+// buttons, exclusions, spreads, and the notified flag all carry forward, and
+// the pending row's date (the day the card was used) is preserved as the
+// authorized date unless Plaid supplies a better one. The NOT EXISTS guard
+// skips adoption when the posted id already has its own row; the caller
+// falls back to a plain upsert. (ASCII-only comment: sqlc miscounts
+// multibyte chars and truncates the generated query.)
+func (q *Queries) AdoptPendingTransaction(ctx context.Context, arg AdoptPendingTransactionParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, adoptPendingTransaction,
+		arg.PostedPlaidID,
+		arg.Date,
+		arg.AuthorizedDate,
+		arg.Amount,
+		arg.Name,
+		arg.MerchantName,
+		arg.CategoryPrimary,
+		arg.CategoryDetailed,
+		arg.CategoryConfidence,
+		arg.PaymentChannel,
+		arg.RawJson,
+		arg.PendingPlaidID,
+	)
+}
+
+const backfillAuthorizedDate = `-- name: BackfillAuthorizedDate :exec
+UPDATE transactions
+SET authorized_date = (
+    SELECT COALESCE(p.authorized_date, p.date)
+    FROM transactions p WHERE p.plaid_tx_id = ?1
+)
+WHERE transactions.plaid_tx_id = ?2
+  AND transactions.authorized_date IS NULL
+`
+
+type BackfillAuthorizedDateParams struct {
+	PendingPlaidID string `json:"pending_plaid_id"`
+	PostedPlaidID  string `json:"posted_plaid_id"`
+}
+
+// Recovery path for cursor replays: a resent settled transaction whose
+// posted row already exists skips adoption, but its pending sibling may
+// still be in the table (soft-deleted by the original settle). Lift that
+// sibling's date into the posted row's empty authorized date. A missing
+// sibling writes NULL over NULL, which is a no-op.
+func (q *Queries) BackfillAuthorizedDate(ctx context.Context, arg BackfillAuthorizedDateParams) error {
+	_, err := q.db.ExecContext(ctx, backfillAuthorizedDate, arg.PendingPlaidID, arg.PostedPlaidID)
+	return err
+}
 
 const clearAmortEnd = `-- name: ClearAmortEnd :exec
 UPDATE transactions SET amort_end = NULL WHERE tx_id = ?
@@ -49,7 +136,7 @@ func (q *Queries) DeleteTransactionsByItem(ctx context.Context, itemID string) e
 }
 
 const getPendingNotifications = `-- name: GetPendingNotifications :many
-SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified FROM transactions
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
@@ -89,6 +176,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 			&i.Transaction.Excluded,
 			&i.Transaction.RawJson,
 			&i.Transaction.Notified,
+			&i.Transaction.AuthorizedDate,
 		); err != nil {
 			return nil, err
 		}
@@ -104,7 +192,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified FROM transactions WHERE tx_id = ?
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date FROM transactions WHERE tx_id = ?
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
@@ -128,6 +216,7 @@ func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction,
 		&i.Excluded,
 		&i.RawJson,
 		&i.Notified,
+		&i.AuthorizedDate,
 	)
 	return i, err
 }
@@ -225,13 +314,17 @@ func (q *Queries) SoftDeleteTransaction(ctx context.Context, plaidTxID string) e
 
 const upsertTransaction = `-- name: UpsertTransaction :one
 INSERT INTO transactions (
-    tx_id, plaid_tx_id, account_id, date, amount,
+    tx_id, plaid_tx_id, account_id, date, authorized_date, amount,
     name, merchant_name, category_primary, category_detailed, category_confidence,
     payment_channel, pending, raw_json, notified
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
+    -- Plaid's authorized date wins when present, but a null must not clobber
+    -- a date recovered via adoption: cursor replays resend all history with
+    -- authorized_date null for institutions that never supply it.
+    authorized_date = COALESCE(excluded.authorized_date, authorized_date),
     amount = excluded.amount,
     name = excluded.name,
     merchant_name = excluded.merchant_name,
@@ -250,6 +343,7 @@ type UpsertTransactionParams struct {
 	PlaidTxID          string  `json:"plaid_tx_id"`
 	AccountID          string  `json:"account_id"`
 	Date               string  `json:"date"`
+	AuthorizedDate     *string `json:"authorized_date"`
 	Amount             float64 `json:"amount"`
 	Name               string  `json:"name"`
 	MerchantName       *string `json:"merchant_name"`
@@ -268,6 +362,7 @@ func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionPa
 		arg.PlaidTxID,
 		arg.AccountID,
 		arg.Date,
+		arg.AuthorizedDate,
 		arg.Amount,
 		arg.Name,
 		arg.MerchantName,

@@ -966,7 +966,9 @@ func formatTransactionMessage(tx sqlcgen.Transaction) string {
 		b.WriteString(fmt.Sprintf("🏷 %s\n", html.EscapeString(cat)))
 	}
 
-	b.WriteString(fmt.Sprintf("📅 %s", humanDate(tx.Date)))
+	// The authorized (swipe) date is when the money actually left the user's
+	// life; the posted date is banking plumbing. Show the one spend counts on.
+	b.WriteString(fmt.Sprintf("📅 %s", humanDate(stringOr(tx.AuthorizedDate, tx.Date))))
 
 	if tx.PaymentChannel != "" {
 		b.WriteString(fmt.Sprintf("  ·  %s", html.EscapeString(tx.PaymentChannel)))

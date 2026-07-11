@@ -61,6 +61,7 @@ type Transaction struct {
 	Excluded           int64   `json:"excluded"`
 	RawJson            *string `json:"raw_json"`
 	Notified           int64   `json:"notified"`
+	AuthorizedDate     *string `json:"authorized_date"`
 }
 
 type User struct {
