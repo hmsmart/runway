@@ -99,6 +99,7 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 			// the earlier fields populated; don't act on a half-read user.
 			row = sqlcgen.User{}
 		}
+		row.TgFirstName = &update.Message.From.FirstName
 		next(WithUser(ctx, domains.NewUser(row)), b, update)
 	}
 }

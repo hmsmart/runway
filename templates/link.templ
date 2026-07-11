@@ -1,33 +1,35 @@
 package templates
 
-templ LinkPage(linkToken string) {
-	<!DOCTYPE html>
-	<html>
-		<body>
-			<button id="link-btn" data-token={ linkToken }>Link Account</button>
-			<p id="status"></p>
-			<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
-			<script>
-				const btn = document.getElementById('link-btn');
-				const handler = Plaid.create({
-					token: btn.dataset.token,
-					onSuccess: async (publicToken, metadata) => {
-						document.getElementById('status').textContent = 'Exchanging...';
-						const res = await fetch('/exchange-token', {
-							method: 'POST',
-							headers: {'Content-Type': 'application/json'},
-							body: JSON.stringify({public_token: publicToken, link_token: btn.dataset.token})
-						});
-						document.getElementById('status').textContent = res.ok
-							? 'Linked: ' + (metadata.institution?.name ?? 'account')
-							: 'Failed';
-					},
-					onExit: (err) => {
-						if (err) document.getElementById('status').textContent = err.display_message || 'Link exited with an error';
-					}
-				});
-				btn.addEventListener('click', () => handler.open());
-			</script>
-		</body>
-	</html>
+script initPlaidLink(token string) {
+    const btn = document.getElementById('link-button');
+    const handler = Plaid.create({
+        token: token,
+        onSuccess: async (publicToken, metadata) => {
+            // ...
+        }
+    });
+    btn.addEventListener('click', () => handler.open());
+}
+
+templ LinkPage(linkToken string, name string) {
+    @Layout("Link Account") {
+	<h1>welcome to runway, { name }</h1>
+	<h3 class="pico-color-amber-200">before you begin</h3>
+	<p>
+		runway uses <a href="https://plaid.com" target="_blank"><span class="sc">plaid</span></a> to securely connect to your bank.
+		<span class="sc">plaid</span> is used by thousands of apps to link financial accounts. runway never sees or stores
+		your bank credentials. <span class="sc">plaid</span> handles that entirely on their end.
+	</p>
+	<p>
+		once connected, runway syncs your transactions so it can track your daily spending and
+		help you stay on top of your money. that's it. no selling your data, no ads, no weird stuff.
+	</p>
+	<p>
+		use of your financial data is governed by our <a href="/privacy">privacy policy</a>.
+	</p>
+	<button id="link-button">connect your bank</button>
+        <p id="status"></p>
+        <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+        @initPlaidLink(linkToken)
+    }
 }

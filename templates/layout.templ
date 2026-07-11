@@ -1,0 +1,51 @@
+// layout.templ
+package templates
+
+templ Layout(title string) {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <title>[ runway :: { title }]</title>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"/>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.colors.min.css"/>
+            <style>
+                body {
+                    display: flex;
+                    flex-direction: column;
+                    min-height: 100vh;
+                }
+                main { flex: 1; }
+                footer {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                .sc { font-variant: small-caps; }
+            </style>
+        </head>
+        <body>
+            <header>
+                @Nav()
+            </header>
+            <main class="container">
+                { children... }
+            </main>
+            <footer class="container">
+                <div>
+                    (ɔ) 2026 runway is an inetd project
+                </div>
+                <div>
+                    <a href="/privacy">privacy policy</a>
+                </div>
+            </footer>
+        </body>
+    </html>
+}
+
+templ Nav() {
+    <nav class="container">
+        <ul>
+            <li><strong>runway</strong></li>
+        </ul>
+    </nav>
+}

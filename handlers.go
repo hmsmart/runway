@@ -44,16 +44,14 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			slog.Error("parsing body request", "for", ip, "err", err)
-			http.Error(w, "bad request", http.StatusBadRequest)
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad request", "err", err)
 			return
 		}
 		// The link token ties this exchange back to the Telegram user who
 		// requested /link; without a live cache entry the POST is a stranger.
 		cached := store.LinkTokens.Get(body.LinkToken)
 		if cached == nil {
-			slog.Info("exchange with unknown or expired link token", "for", ip)
-			http.Error(w, "bad token", http.StatusBadRequest)
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad token")
 			return
 		}
 		tgUser := cached.Value()
@@ -63,8 +61,7 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		defer cancel()
 		exchangeResponse, _, err := plaidClient.PlaidApi.ItemPublicTokenExchange(callCtx).ItemPublicTokenExchangeRequest(*exchangeRequest).Execute()
 		if err != nil {
-			slog.Error("unable to generate access token", "for", ip, "err", err)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
+			httpError(r.Context(), w, ip, http.StatusBadGateway, "bad gateway", "err", err)
 			return
 		}
 		// Consume the token only once the exchange succeeds, so a transient
@@ -79,16 +76,14 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		itemRequest := plaid.NewItemGetRequest(accessToken)
 		itemResp, _, err := plaidClient.PlaidApi.ItemGet(callCtx).ItemGetRequest(*itemRequest).Execute()
 		if err != nil {
-			slog.Error("unable to retrieve item", "for", ip, "err", err)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
+			httpError(r.Context(), w, ip, http.StatusBadGateway, "bad gateway", "err", err)
 			return
 		}
 		item := itemResp.GetItem()
 		slog.Info("retrieved item data", "for", ip)
 		atenc, err := EncryptColumnSecret(accessToken, item.ItemId, cfg.DBCryptKey)
 		if err != nil {
-			slog.Error("unable to encrypt access token", "for", ip, "err", err)
-			http.Error(w, "database err", http.StatusInternalServerError)
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "database err", "err", err)
 			return
 		}
 		err = store.CreateItem(persistCtx, sqlcgen.CreateItemParams{
@@ -99,8 +94,7 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			Status:          "active",
 		})
 		if err != nil {
-			slog.Error("unable to insert record", "for", ip, "err", err)
-			http.Error(w, "database err", http.StatusInternalServerError)
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "database err", "err", err)
 			return
 		}
 		slog.Info("successfully added new item to database", "for", ip)
@@ -132,7 +126,7 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 		token := r.URL.Query().Get("token")
 		cached := store.TGTokens.Get(token)
 		if cached == nil {
-			http.Error(w, "bad token", http.StatusBadRequest)
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad token")
 			return
 		}
 		// Link tokens are single-use: dead once redeemed. The cached user is
@@ -173,14 +167,32 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 				b, _ := io.ReadAll(httpResp.Body)
 				respBody = string(b)
 			}
-			slog.Error("unable to generate link token", "for", ip, "err", err, "resp", respBody)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
+			httpError(r.Context(), w, ip, http.StatusBadGateway, "bad gateway", "err", err, "resp", respBody)
 			return
 		}
 		plaidLinkToken := linkTokenCreateResp.GetLinkToken()
 		store.LinkTokens.Set(plaidLinkToken, tgUser, cfg.TokenTTL)
-		if err := templates.LinkPage(plaidLinkToken).Render(r.Context(), w); err != nil {
+		if err := templates.LinkPage(plaidLinkToken, tgUser.FirstName()).Render(r.Context(), w); err != nil {
 			slog.Error("failed to render link page", "for", ip, "err", err)
 		}
+	}
+}
+
+func handlePrivacy(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	err := templates.PrivacyPage().Render(r.Context(), w)
+	if err != nil {
+		httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// httpError logs the error, writes the given status code, and renders the
+// styled error page. args are extra slog key/value pairs appended after
+// "for", ip.
+func httpError(ctx context.Context, w http.ResponseWriter, ip string, code int, msg string, args ...any) {
+	slog.Error(msg, append([]any{"for", ip}, args...)...)
+	w.WriteHeader(code)
+	if err := templates.ErrorPage(code, msg).Render(ctx, w); err != nil {
+		slog.Error("failed to render error page", "for", ip, "err", err)
 	}
 }
