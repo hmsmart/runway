@@ -203,6 +203,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleBudget, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/runway", bot.MatchTypeExact,
 		chain(t.handleRunway, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/report", bot.MatchTypePrefix,
+		chain(t.handleReport, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/accounts", bot.MatchTypeExact,
@@ -288,7 +290,8 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"Once your budget is set, <code>/link</code> unlocks so you can connect a bank account."
 	default:
 		text = "🧭 <b>Runway commands</b>\n\n" +
-			"<code>/runway</code> — today's spend, your daily rates, and days of cash left\n" +
+			"<code>/runway</code> — yesterday's spend, your daily rates, and days of cash left\n" +
+			"<code>/report [TIME]</code> — get the runway report every day at TIME (e.g. <code>/report 8:00</code>); <code>/report off</code> stops it\n" +
 			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
 			"<code>/link</code> — connect a bank account\n" +
 			"<code>/accounts</code> — list your linked accounts and balances\n" +
@@ -622,7 +625,8 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 		// commands themselves still work if typed — this only trims the menu.
 		if user.Discretionary() != nil {
 			cmds = append(cmds,
-				models.BotCommand{Command: "runway", Description: "Today's spend and days of cash left"},
+				models.BotCommand{Command: "runway", Description: "Yesterday's spend and days of cash left"},
+				models.BotCommand{Command: "report", Description: "Schedule a daily runway report"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},
 				models.BotCommand{Command: "unlink", Description: "List accounts, or unlink one by number"},

@@ -20,6 +20,7 @@ type User struct {
 	username      string
 	firstname     string
 	discretionary *float64
+	reportTime    *string
 	permissions   []Permission
 }
 
@@ -43,6 +44,7 @@ func NewUser(u sqlcgen.User) *User {
 		newuser.username = *u.TgUsername
 	}
 	newuser.discretionary = u.DiscretionaryMonthly
+	newuser.reportTime = u.ReportTime
 	newuser.permissions = make([]Permission, 0)
 	if u.Active == true {
 		newuser.permissions = append(newuser.permissions, PermissionActive)
@@ -65,6 +67,10 @@ func (u *User) Has(p Permission) bool {
 // Discretionary returns the user's monthly discretionary budget, or nil if
 // they haven't set one yet. Setup requires it before an account can be linked.
 func (u *User) Discretionary() *float64 { return u.discretionary }
+
+// ReportTime returns the user's scheduled daily report time as a zero-padded
+// 24h "HH:MM", or nil if they haven't scheduled one.
+func (u *User) ReportTime() *string { return u.reportTime }
 
 func (u *User) ID() string        { return u.userID }
 func (u *User) TelegramID() int64 { return u.telegramID }

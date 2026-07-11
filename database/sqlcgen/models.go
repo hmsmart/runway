@@ -30,6 +30,7 @@ type DailySpend struct {
 	Spend  float64  `json:"spend"`
 	Ema14  *float64 `json:"ema_14"`
 	Ema28  *float64 `json:"ema_28"`
+	Ema84  *float64 `json:"ema_84"`
 }
 
 type Item struct {
@@ -74,4 +75,6 @@ type User struct {
 	Active               bool      `json:"active"`
 	CreatedAt            time.Time `json:"created_at"`
 	DiscretionaryMonthly *float64  `json:"discretionary_monthly"`
+	ReportTime           *string   `json:"report_time"`
+	ReportSentOn         *string   `json:"report_sent_on"`
 }

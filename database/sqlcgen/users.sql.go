@@ -46,7 +46,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id string) error {
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly FROM users WHERE id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on FROM users WHERE id = ? and active = 1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -62,12 +62,14 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.Active,
 		&i.CreatedAt,
 		&i.DiscretionaryMonthly,
+		&i.ReportTime,
+		&i.ReportSentOn,
 	)
 	return i, err
 }
 
 const getUserByTelegram = `-- name: GetUserByTelegram :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly FROM users WHERE tg_id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on FROM users WHERE tg_id = ? and active = 1
 `
 
 func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, error) {
@@ -83,6 +85,8 @@ func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, err
 		&i.Active,
 		&i.CreatedAt,
 		&i.DiscretionaryMonthly,
+		&i.ReportTime,
+		&i.ReportSentOn,
 	)
 	return i, err
 }
@@ -114,6 +118,65 @@ func (q *Queries) ListActiveUserIDs(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
+const listDueReports = `-- name: ListDueReports :many
+SELECT id, tg_id FROM users
+WHERE active = 1
+  AND tg_id IS NOT NULL
+  AND report_time IS NOT NULL
+  AND report_time <= ?
+  AND (report_sent_on IS NULL OR report_sent_on < ?)
+`
+
+type ListDueReportsParams struct {
+	ReportTime   *string `json:"report_time"`
+	ReportSentOn *string `json:"report_sent_on"`
+}
+
+type ListDueReportsRow struct {
+	ID   string `json:"id"`
+	TgID *int64 `json:"tg_id"`
+}
+
+// Users whose scheduled report time has passed today and who haven't been
+// sent one yet today. Both comparisons are string comparisons over
+// zero-padded "HH:MM" and "YYYY-MM-DD" values.
+func (q *Queries) ListDueReports(ctx context.Context, arg ListDueReportsParams) ([]ListDueReportsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDueReports, arg.ReportTime, arg.ReportSentOn)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDueReportsRow{}
+	for rows.Next() {
+		var i ListDueReportsRow
+		if err := rows.Scan(&i.ID, &i.TgID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markReportSent = `-- name: MarkReportSent :exec
+UPDATE users SET report_sent_on = ? WHERE id = ?
+`
+
+type MarkReportSentParams struct {
+	ReportSentOn *string `json:"report_sent_on"`
+	ID           string  `json:"id"`
+}
+
+func (q *Queries) MarkReportSent(ctx context.Context, arg MarkReportSentParams) error {
+	_, err := q.db.ExecContext(ctx, markReportSent, arg.ReportSentOn, arg.ID)
+	return err
+}
+
 const redeemInviteCode = `-- name: RedeemInviteCode :execresult
 UPDATE users
 SET tg_id = ?, active = 1
@@ -140,5 +203,20 @@ type SetDiscretionaryParams struct {
 
 func (q *Queries) SetDiscretionary(ctx context.Context, arg SetDiscretionaryParams) error {
 	_, err := q.db.ExecContext(ctx, setDiscretionary, arg.DiscretionaryMonthly, arg.ID)
+	return err
+}
+
+const setReportSchedule = `-- name: SetReportSchedule :exec
+UPDATE users SET report_time = ?, report_sent_on = ? WHERE id = ?
+`
+
+type SetReportScheduleParams struct {
+	ReportTime   *string `json:"report_time"`
+	ReportSentOn *string `json:"report_sent_on"`
+	ID           string  `json:"id"`
+}
+
+func (q *Queries) SetReportSchedule(ctx context.Context, arg SetReportScheduleParams) error {
+	_, err := q.db.ExecContext(ctx, setReportSchedule, arg.ReportTime, arg.ReportSentOn, arg.ID)
 	return err
 }

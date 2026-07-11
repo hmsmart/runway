@@ -20,6 +20,7 @@ import (
 const (
 	alpha14 = 2.0 / 15.0
 	alpha28 = 2.0 / 29.0
+	alpha84 = 2.0 / 85.0
 )
 
 // recomputeDailySpend rebuilds a user's entire daily_spend series from the
@@ -53,7 +54,7 @@ func recomputeDailySpend(ctx context.Context, store *database.Store, userID stri
 		}
 		// Every day in the range gets a row, including zero-spend days —
 		// the EMAs must decay through quiet stretches.
-		var ema14, ema28 float64
+		var ema14, ema28, ema84 float64
 		seeded := false
 		for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 			ds := d.Format(time.DateOnly)
@@ -61,8 +62,9 @@ func recomputeDailySpend(ctx context.Context, store *database.Store, userID stri
 			if seeded {
 				ema14 = alpha14*spend + (1-alpha14)*ema14
 				ema28 = alpha28*spend + (1-alpha28)*ema28
+				ema84 = alpha84*spend + (1-alpha84)*ema84
 			} else {
-				ema14, ema28 = spend, spend
+				ema14, ema28, ema84 = spend, spend, spend
 				seeded = true
 			}
 			err := q.InsertDailySpend(ctx, sqlcgen.InsertDailySpendParams{
@@ -71,6 +73,7 @@ func recomputeDailySpend(ctx context.Context, store *database.Store, userID stri
 				Spend:  spend,
 				Ema14:  &ema14,
 				Ema28:  &ema28,
+				Ema84:  &ema84,
 			})
 			if err != nil {
 				return fmt.Errorf("insert daily spend %s: %w", ds, err)
@@ -125,40 +128,65 @@ func dailyTotals(txs []sqlcgen.ListSpendTransactionsByUserRow, today string) (ma
 	return daily, first
 }
 
-// handleRunway reports today's spend, the smoothed daily rates, and how long
-// the user's cash lasts at those rates — the number the app is named for.
+// errNoSpendHistory means a runway report can't be built because the user has
+// no daily-spend rows yet (no linked account, or no countable transactions).
+var errNoSpendHistory = errors.New("no spend history")
+
+// buildRunwayReport recomputes the user's series and renders the runway
+// report: yesterday's spend, the smoothed daily rates, and how long the cash
+// lasts at those rates — the number the app is named for. Yesterday is the
+// anchor because it's the most recent complete day; today's partial total
+// would read as a spending dip every morning. Shared by the /runway command
+// and the scheduled daily report.
+func (t *TelegramBot) buildRunwayReport(ctx context.Context, userID string) (string, error) {
+	// Recompute first: the stored series may be up to an hour stale, and
+	// this is the moment the user is actually looking at the numbers.
+	if err := recomputeDailySpend(ctx, t.store, userID); err != nil {
+		return "", fmt.Errorf("recompute daily spend: %w", err)
+	}
+	now := time.Now()
+	spendLabel := "Yesterday"
+	day, err := t.store.GetDailySpendDay(ctx, sqlcgen.GetDailySpendDayParams{
+		UserID: userID,
+		Date:   now.AddDate(0, 0, -1).Format(time.DateOnly),
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		// The series starts at the first spend day, so a user whose first
+		// transaction landed today has no yesterday row yet. Show the
+		// partial day rather than claiming there's no history.
+		spendLabel = "Today"
+		day, err = t.store.GetDailySpendDay(ctx, sqlcgen.GetDailySpendDayParams{
+			UserID: userID,
+			Date:   now.Format(time.DateOnly),
+		})
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errNoSpendHistory
+	} else if err != nil {
+		return "", fmt.Errorf("load daily spend: %w", err)
+	}
+	accounts, err := t.store.ListTrackedAccountsByUser(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("list tracked accounts: %w", err)
+	}
+	return formatRunwayMessage(day, accounts, spendLabel, now), nil
+}
+
 func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *models.Update) {
 	user := UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	slog.Info("called runway", "chatID", chatID)
-	// Recompute first: the stored series may be up to an hour stale, and
-	// this is the moment the user is actually looking at the numbers.
-	if err := recomputeDailySpend(ctx, t.store, user.ID()); err != nil {
-		slog.Error("failed to recompute daily spend", "user", user.ID(), "err", err)
-		t.sendText(ctx, b, chatID, errTryLater)
-		return
-	}
-	today := time.Now().Format(time.DateOnly)
-	day, err := t.store.GetDailySpendDay(ctx, sqlcgen.GetDailySpendDayParams{
-		UserID: user.ID(),
-		Date:   today,
-	})
-	if errors.Is(err, sql.ErrNoRows) {
+	msg, err := t.buildRunwayReport(ctx, user.ID())
+	if errors.Is(err, errNoSpendHistory) {
 		t.sendText(ctx, b, chatID,
 			"No spending history yet — connect a bank account with <code>/link</code> and I'll start tracking your runway.")
 		return
 	} else if err != nil {
-		slog.Error("failed to load daily spend", "user", user.ID(), "err", err)
+		slog.Error("failed to build runway report", "user", user.ID(), "err", err)
 		t.sendText(ctx, b, chatID, errTryLater)
 		return
 	}
-	accounts, err := t.store.ListTrackedAccountsByUser(ctx, user.ID())
-	if err != nil {
-		slog.Error("failed to list tracked accounts", "user", user.ID(), "err", err)
-		t.sendText(ctx, b, chatID, errTryLater)
-		return
-	}
-	t.sendText(ctx, b, chatID, formatRunwayMessage(day, accounts))
+	t.sendText(ctx, b, chatID, msg)
 }
 
 // formatRunwayMessage renders the /runway report as an aligned two-column
@@ -166,7 +194,7 @@ func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *mode
 // preferred, since that's what's actually spendable) minus credit-card
 // balances owed: cards are spend that hasn't left checking yet, so ignoring
 // them would overstate the runway.
-func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account) string {
+func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, spendLabel string, now time.Time) string {
 	var cash, owed float64
 	for _, a := range accounts {
 		if a.Type != nil && *a.Type == "credit" {
@@ -187,13 +215,16 @@ func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account) str
 		netStr = "-" + formatDollarsCents(-net)
 	}
 
-	// A tail (trend marker) hangs off the value column so it never disturbs
-	// the alignment; an empty label renders as a group separator.
+	// A tail (trend marker or landing date) hangs off the value column so it
+	// never disturbs the alignment; an empty label renders as a group
+	// separator. Each trend compares a rate to the next-longer horizon —
+	// spend vs 14d, 14d vs 28d, 28d vs 84d — so red means spending is
+	// running hotter than its longer-term baseline.
 	type row struct{ label, value, tail string }
 	rows := []row{
-		{"Spend today", formatDollarsCents(day.Spend), ""},
-		{"14-day rate", formatEMA(day.Ema14), trendIndicator(day.Spend, day.Ema14)},
-		{"28-day rate", formatEMA(day.Ema28), trendIndicator(day.Spend, day.Ema28)},
+		{spendLabel, formatDollarsCents(day.Spend), trendIndicator(day.Spend, day.Ema14)},
+		{"14-day rate", formatEMA(day.Ema14), emaTrend(day.Ema14, day.Ema28)},
+		{"28-day rate", formatEMA(day.Ema28), emaTrend(day.Ema28, day.Ema84)},
 		{},
 	}
 	if owed > 0 {
@@ -205,8 +236,8 @@ func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account) str
 	rows = append(rows,
 		row{"On hand", netStr, ""},
 		row{},
-		row{"Runway @ 14d", runwayDays(net, day.Ema14), ""},
-		row{"Runway @ 28d", runwayDays(net, day.Ema28), ""},
+		row{"Runway @ 14d", runwayDays(net, day.Ema14), runwayEnd(now, net, day.Ema14)},
+		row{"Runway @ 28d", runwayDays(net, day.Ema28), runwayEnd(now, net, day.Ema28)},
 	)
 
 	// Pad by rune count, not bytes: values can hold non-ASCII ("∞", "—").
@@ -233,17 +264,26 @@ func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account) str
 	return sb.String()
 }
 
-// trendIndicator marks how today's spend sits against a smoothed rate:
-// red when today is outspending it, green when under it. Exactly on the
-// rate counts as under — you haven't outspent it yet.
-func trendIndicator(spend float64, ema *float64) string {
-	if ema == nil {
+// trendIndicator marks how a spend figure sits against a longer-horizon
+// baseline: red when it's outspending the baseline, green when under it.
+// Exactly on the baseline counts as under — you haven't outspent it yet.
+func trendIndicator(spend float64, baseline *float64) string {
+	if baseline == nil {
 		return ""
 	}
-	if spend > *ema {
+	if spend > *baseline {
 		return "  🔴"
 	}
 	return "  🟢"
+}
+
+// emaTrend is trendIndicator for comparing two smoothed rates, where the
+// shorter horizon may itself be missing.
+func emaTrend(ema, baseline *float64) string {
+	if ema == nil {
+		return ""
+	}
+	return trendIndicator(*ema, baseline)
 }
 
 // formatEMA renders a smoothed rate, or a placeholder before one exists.
@@ -268,6 +308,22 @@ func runwayDays(cash float64, ema *float64) string {
 		return "1 day"
 	}
 	return fmt.Sprintf("%d days", d)
+}
+
+// runwayEnd renders the calendar day the cash runs out at a daily rate, as a
+// tail on the runway row. Empty when there's no finite runway to land — the
+// day count already says "0 days" or "∞". The year is spelled out only when
+// the landing day isn't in the current year, where "Jan 02" alone would be
+// ambiguous.
+func runwayEnd(now time.Time, cash float64, ema *float64) string {
+	if cash <= 0 || ema == nil || *ema <= 0 {
+		return ""
+	}
+	end := now.AddDate(0, 0, int(cash / *ema))
+	if end.Year() != now.Year() {
+		return "  → " + end.Format("Jan 02, 2006")
+	}
+	return "  → " + end.Format("Jan 02")
 }
 
 // recomputeAllDailySpend refreshes the series for every active user. It backs

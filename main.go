@@ -134,6 +134,22 @@ func run(ctx context.Context) error {
 		}
 	}()
 
+	// Scheduled daily reports. The 30s tick only bounds how late a report can
+	// be past its slot; dueness itself is state in the users table, so a slot
+	// missed to downtime sends on the first tick after startup.
+	go func() {
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		for {
+			tg.sendDueReports(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+
 	select {
 	case err := <-srvErr:
 		return fmt.Errorf("http server: %w", err)

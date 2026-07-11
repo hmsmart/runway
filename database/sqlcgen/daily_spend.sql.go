@@ -19,7 +19,7 @@ func (q *Queries) DeleteDailySpendByUser(ctx context.Context, userID string) err
 }
 
 const getDailySpendDay = `-- name: GetDailySpendDay :one
-SELECT date, user_id, spend, ema_14, ema_28 FROM daily_spend WHERE user_id = ? AND date = ?
+SELECT date, user_id, spend, ema_14, ema_28, ema_84 FROM daily_spend WHERE user_id = ? AND date = ?
 `
 
 type GetDailySpendDayParams struct {
@@ -36,13 +36,14 @@ func (q *Queries) GetDailySpendDay(ctx context.Context, arg GetDailySpendDayPara
 		&i.Spend,
 		&i.Ema14,
 		&i.Ema28,
+		&i.Ema84,
 	)
 	return i, err
 }
 
 const insertDailySpend = `-- name: InsertDailySpend :exec
-INSERT INTO daily_spend (date, user_id, spend, ema_14, ema_28)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO daily_spend (date, user_id, spend, ema_14, ema_28, ema_84)
+VALUES (?, ?, ?, ?, ?, ?)
 `
 
 type InsertDailySpendParams struct {
@@ -51,6 +52,7 @@ type InsertDailySpendParams struct {
 	Spend  float64  `json:"spend"`
 	Ema14  *float64 `json:"ema_14"`
 	Ema28  *float64 `json:"ema_28"`
+	Ema84  *float64 `json:"ema_84"`
 }
 
 func (q *Queries) InsertDailySpend(ctx context.Context, arg InsertDailySpendParams) error {
@@ -60,6 +62,7 @@ func (q *Queries) InsertDailySpend(ctx context.Context, arg InsertDailySpendPara
 		arg.Spend,
 		arg.Ema14,
 		arg.Ema28,
+		arg.Ema84,
 	)
 	return err
 }

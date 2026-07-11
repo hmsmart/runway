@@ -23,5 +23,5 @@ SELECT * FROM daily_spend WHERE user_id = ? AND date = ?;
 DELETE FROM daily_spend WHERE user_id = ?;
 
 -- name: InsertDailySpend :exec
-INSERT INTO daily_spend (date, user_id, spend, ema_14, ema_28)
-VALUES (?, ?, ?, ?, ?);
+INSERT INTO daily_spend (date, user_id, spend, ema_14, ema_28, ema_84)
+VALUES (?, ?, ?, ?, ?, ?);
