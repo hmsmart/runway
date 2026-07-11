@@ -169,6 +169,8 @@ func (t *TelegramBot) handleUnlinkCallback(ctx context.Context, b *bot.Bot, upda
 		return
 	}
 	slog.Info("item unlinked", "item", itemID, "chatID", user.TelegramID())
+	// The unlinked item's transactions are gone, so the spend series changed.
+	t.recomputeSpend(ctx)
 	t.editCallbackMessage(ctx, b, update, fmt.Sprintf("🔌 Unlinked <b>%s</b> and deleted its data.", inst))
 	t.answerCallback(ctx, b, update, "Unlinked")
 }
