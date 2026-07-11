@@ -169,7 +169,53 @@ func (t *TelegramBot) buildRunwayReport(ctx context.Context, userID string) (str
 	if err != nil {
 		return "", fmt.Errorf("list tracked accounts: %w", err)
 	}
-	return formatRunwayMessage(day, accounts, spendLabel, now), nil
+	u, err := t.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("load user: %w", err)
+	}
+	txs, err := t.store.ListSpendTransactionsByUser(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("list spend transactions: %w", err)
+	}
+	committed := todaysCommitments(txs, now.Format(time.DateOnly))
+	// Today's row always exists once there's any history (the recompute
+	// materializes every day through today), but tolerate its absence.
+	var todaySpend float64
+	if todayRow, err := t.store.GetDailySpendDay(ctx, sqlcgen.GetDailySpendDayParams{
+		UserID: userID,
+		Date:   now.Format(time.DateOnly),
+	}); err == nil {
+		todaySpend = todayRow.Spend
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("load today's spend: %w", err)
+	}
+	return formatRunwayMessage(day, accounts, u.DiscretionaryMonthly, committed, todaySpend, spendLabel, now), nil
+}
+
+// todaysCommitments sums the slices of spread transactions whose amort window
+// covers today — spend already promised to today by earlier Spread taps, as
+// opposed to choices still open today. Window semantics match dailyTotals:
+// date inclusive, amort_end exclusive. Malformed windows are skipped here
+// (dailyTotals counts them unspread, which makes them regular spend, not a
+// commitment).
+func todaysCommitments(txs []sqlcgen.ListSpendTransactionsByUserRow, today string) float64 {
+	var total float64
+	for _, tx := range txs {
+		if tx.AmortEnd == nil || *tx.AmortEnd <= tx.Date {
+			continue
+		}
+		if tx.Date > today || *tx.AmortEnd <= today {
+			continue
+		}
+		start, err1 := time.Parse(time.DateOnly, tx.Date)
+		end, err2 := time.Parse(time.DateOnly, *tx.AmortEnd)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		days := int(end.Sub(start).Hours() / 24)
+		total += tx.Amount / float64(days)
+	}
+	return total
 }
 
 func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -190,11 +236,15 @@ func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *mode
 }
 
 // formatRunwayMessage renders the /runway report as an aligned two-column
-// ledger inside a <pre> block. Cash on hand is depository balances (available
+// ledger inside a <pre> block. It opens with today's plan when a budget is
+// set: the day's allowance (monthly budget spread evenly over the month's
+// days), what spread transactions have already committed against today, what's
+// been swiped so far today, and what remains. Cash on hand is depository
+// balances (available
 // preferred, since that's what's actually spendable) minus credit-card
 // balances owed: cards are spend that hasn't left checking yet, so ignoring
 // them would overstate the runway.
-func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, spendLabel string, now time.Time) string {
+func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, budget *float64, committed, todaySpend float64, spendLabel string, now time.Time) string {
 	var cash, owed float64
 	for _, a := range accounts {
 		if a.Type != nil && *a.Type == "credit" {
@@ -221,12 +271,39 @@ func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, spe
 	// spend vs 14d, 14d vs 28d, 28d vs 84d — so red means spending is
 	// running hotter than its longer-term baseline.
 	type row struct{ label, value, tail string }
-	rows := []row{
-		{spendLabel, formatDollarsCents(day.Spend), trendIndicator(day.Spend, day.Ema14)},
-		{"14-day rate", formatEMA(day.Ema14), emaTrend(day.Ema14, day.Ema28)},
-		{"28-day rate", formatEMA(day.Ema28), emaTrend(day.Ema28, day.Ema84)},
-		{},
+	var rows []row
+	if budget != nil {
+		// Days in the whole month, not days remaining: the allowance is a
+		// steady daily figure, not a pace-corrected one.
+		daysInMonth := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, now.Location()).Day()
+		allowance := *budget / float64(daysInMonth)
+		// Today's series row already folds in the amort slices, so subtracting
+		// committed leaves just what was actually swiped today. Clamp: float
+		// drift could otherwise show a tiny negative.
+		spent := max(todaySpend-committed, 0)
+		available := allowance - committed - spent
+		rows = append(rows, row{"Allowance", formatDollarsCents(allowance), ""})
+		if committed > 0 {
+			rows = append(rows, row{"Commitments", "-" + formatDollarsCents(committed), ""})
+		}
+		if spent > 0 {
+			rows = append(rows, row{"Spent today", "-" + formatDollarsCents(spent), ""})
+		}
+		availableStr := formatDollarsCents(available)
+		if available < 0 {
+			availableStr = "-" + formatDollarsCents(-available)
+		}
+		rows = append(rows,
+			row{"Available", availableStr, ""},
+			row{},
+		)
 	}
+	rows = append(rows,
+		row{spendLabel, formatDollarsCents(day.Spend), trendIndicator(day.Spend, day.Ema14)},
+		row{"14-day rate", formatEMA(day.Ema14), emaTrend(day.Ema14, day.Ema28)},
+		row{"28-day rate", formatEMA(day.Ema28), emaTrend(day.Ema28, day.Ema84)},
+		row{},
+	)
 	if owed > 0 {
 		rows = append(rows,
 			row{"Cash", formatDollarsCents(cash), ""},
