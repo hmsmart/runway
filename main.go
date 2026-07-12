@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -15,6 +17,9 @@ import (
 	"github.com/hmsmart/runway/domains"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
+
+//go:embed static/*
+var staticFiles embed.FS
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -62,6 +67,12 @@ func run(ctx context.Context) error {
 	slog.Info("telegram setup")
 
 	//Start HTTP Server
+	// Sub into the "static" directory so URLs don't need the "static/" prefix
+	subFS, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealthz(store))
 	mux.Handle("GET /link", handleLink(plaidClient, cfg, store))
@@ -70,6 +81,8 @@ func run(ctx context.Context) error {
 	//Static pages
 	mux.HandleFunc("GET /privacy", handlePrivacy)
 	mux.HandleFunc("GET /{$}", handleIndex)
+	//assets
+	mux.Handle("GET /assets/", handleStatic(http.FileServerFS(subFS)))
 	// Catch-all — must be last
 	mux.HandleFunc("GET /", handleError)
 

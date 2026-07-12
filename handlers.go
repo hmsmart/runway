@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
@@ -192,6 +193,17 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error")
 	}
+}
+
+func handleStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		if strings.HasSuffix(r.URL.Path, "/") {
+			httpError(r.Context(), w, ip, http.StatusNotFound, "page not found", "path", r.URL.RequestURI())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleError(w http.ResponseWriter, r *http.Request) {

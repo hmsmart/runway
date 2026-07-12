@@ -41,3 +41,5 @@ __debug_*
 
 # Task runner checksums
 .task/
+
+static/font/*
