@@ -11,22 +11,10 @@ templ Layout(title string) {
             <meta name="color-scheme" content="light dark">
             <link
             rel="stylesheet"
-            href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.slate.min.css"
+            href="/assets/css/pico.classless.slate.min.css"
             >
-            <style>
-                body {
-                    display: flex;
-                    flex-direction: column;
-                    min-height: 100vh;
-                }
-                main { flex: 1; }
-                footer {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                }
-                .sc { font-variant: small-caps; }
-            </style>
+            <link rel="stylesheet" href="/assets/css/style.css?v=2">
+
         </head>
         <body>
             <header>

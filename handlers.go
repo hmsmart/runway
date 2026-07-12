@@ -202,6 +202,10 @@ func handleStatic(next http.Handler) http.Handler {
 			httpError(r.Context(), w, ip, http.StatusNotFound, "page not found", "path", r.URL.RequestURI())
 			return
 		}
+		// Embedded assets carry no modtime, so downstream caches (Cloudflare)
+		// would otherwise apply long defaults and serve stale files after a
+		// redeploy. no-cache forces revalidation against the origin.
+		w.Header().Set("Cache-Control", "no-cache")
 		next.ServeHTTP(w, r)
 	})
 }

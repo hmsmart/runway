@@ -44,7 +44,7 @@ func Layout(title string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "]</title><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.slate.min.css\"><style>\n                body {\n                    display: flex;\n                    flex-direction: column;\n                    min-height: 100vh;\n                }\n                main { flex: 1; }\n                footer {\n                    display: flex;\n                    justify-content: space-between;\n                    align-items: center;\n                }\n                .sc { font-variant: small-caps; }\n            </style></head><body><header>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "]</title><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><link rel=\"stylesheet\" href=\"/assets/css/pico.classless.slate.min.css\"><link rel=\"stylesheet\" href=\"/assets/css/style.css?v=2\"></head><body><header>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
