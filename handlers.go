@@ -186,6 +186,22 @@ func handlePrivacy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	err := templates.IndexPage().Render(r.Context(), w)
+	if err != nil {
+		httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func handleError(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	err := templates.ErrorPage(http.StatusNotFound, "page not found").Render(r.Context(), w)
+	if err != nil {
+		httpError(r.Context(), w, ip, http.StatusNotFound, "page not found", "path", r.URL.RequestURI())
+	}
+}
+
 // httpError logs the error, writes the given status code, and renders the
 // styled error page. args are extra slog key/value pairs appended after
 // "for", ip.

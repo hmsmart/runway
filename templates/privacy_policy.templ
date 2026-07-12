@@ -2,12 +2,11 @@ package templates
 
 templ PrivacyPage() {
     @Layout("privacy policy") {
+        <hgroup>
+            <h1>privacy policy</h1>
+            <p>last updated: july 10, 2026</p>
+        </hgroup>
         <article>
-            <hgroup>
-                <h1>privacy policy</h1>
-                <p>last updated: july 10, 2026</p>
-            </hgroup>
-
             <section>
                 <h2>what runway is</h2>
                 <p>
@@ -153,6 +152,6 @@ templ PrivacyPage() {
                 <a href="mailto:hayden@inetd.cafe">hayden@inetd.cafe</a>
                 </p>
             </section>
-            </article>
+        </article>
     }
 }

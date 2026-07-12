@@ -4,11 +4,9 @@ import "fmt"
 
 templ ErrorPage(code int, message string) {
     @Layout(fmt.Sprintf("%d", code)){
-        <div class="grid">
-            <hgroup class="error">
-                <h1 class="pico-color-red-550">{ fmt.Sprintf("Error %d", code) }</h1>
-                <h3>{ message }</h3>
-            </hgroup>
-        </div>
+        <hgroup class="error">
+            <h1 class="pico-color-red-550">{ fmt.Sprintf("error %d", code) }</h1>
+            <h3>{ message }</h3>
+        </hgroup>
     }
 }

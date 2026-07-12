@@ -65,9 +65,13 @@ func run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealthz(store))
 	mux.Handle("GET /link", handleLink(plaidClient, cfg, store))
-	mux.HandleFunc("GET /privacy", handlePrivacy)
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
+	//Static pages
+	mux.HandleFunc("GET /privacy", handlePrivacy)
+	mux.HandleFunc("GET /{$}", handleIndex)
+	// Catch-all — must be last
+	mux.HandleFunc("GET /", handleError)
 
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: mux}
 

@@ -3,11 +3,16 @@ package templates
 
 templ Layout(title string) {
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
         <head>
             <title>[ runway :: { title }]</title>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"/>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.colors.min.css"/>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="color-scheme" content="light dark">
+            <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.slate.min.css"
+            >
             <style>
                 body {
                     display: flex;
@@ -27,10 +32,10 @@ templ Layout(title string) {
             <header>
                 @Nav()
             </header>
-            <main class="container">
+            <main>
                 { children... }
             </main>
-            <footer class="container">
+            <footer>
                 <div>
                     (ɔ) 2026 runway is an inetd project
                 </div>
@@ -43,9 +48,13 @@ templ Layout(title string) {
 }
 
 templ Nav() {
-    <nav class="container">
+    <nav>
         <ul>
             <li><strong>runway</strong></li>
+        </ul>
+        <ul>
+            <li><a href="/">about</a></li>
+            <li><a href="/privacy">privacy</a></li>
         </ul>
     </nav>
 }
