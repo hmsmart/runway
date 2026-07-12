@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "preview",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./tmp/preview"],
+      "port": 8917
+    }
+  ]
+}

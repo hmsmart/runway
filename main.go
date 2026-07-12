@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,12 +37,40 @@ func main() {
 	}
 }
 
+// retry runs fn with exponential backoff until it succeeds, the context is
+// canceled, or the attempt budget (~8s total) is spent. Startup races a
+// just-killed predecessor during dev hot-reloads: the old process can briefly
+// hold the port, the sqlite lock, or the telegram session.
+func retry[T any](ctx context.Context, name string, fn func() (T, error)) (T, error) {
+	const attempts = 6
+	backoff := 250 * time.Millisecond
+	var zero T
+	for i := 1; ; i++ {
+		v, err := fn()
+		if err == nil {
+			return v, nil
+		}
+		if i == attempts {
+			return zero, fmt.Errorf("%s: %w", name, err)
+		}
+		slog.Warn("startup step failed, retrying", "step", name, "attempt", i, "err", err)
+		select {
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
 func run(ctx context.Context) error {
 	cfg := LoadSettings()
 
-	store, err := database.GetStore(ctx, cfg.DBPath, cfg.TokenTTL)
+	store, err := retry(ctx, "open database", func() (*database.Store, error) {
+		return database.GetStore(ctx, cfg.DBPath, cfg.TokenTTL)
+	})
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return err
 	}
 
 	slog.Info("connected to database", "path", cfg.DBPath)
@@ -58,9 +87,11 @@ func run(ctx context.Context) error {
 
 	//Connect to Telegram
 
-	tg, err := NewTelegramBot(ctx, cfg, store, plaidClient)
+	tg, err := retry(ctx, "connect telegram", func() (*TelegramBot, error) {
+		return NewTelegramBot(ctx, cfg, store, plaidClient)
+	})
 	if err != nil {
-		return fmt.Errorf("starting telegram: %w", err)
+		return err
 	}
 	tg.RegisterHandlers()
 	go tg.bot.Start(ctx)
@@ -82,15 +113,22 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("GET /privacy", handlePrivacy)
 	mux.HandleFunc("GET /{$}", handleIndex)
 	//assets
-	mux.Handle("GET /assets/", handleStatic(http.FileServerFS(subFS)))
+	mux.Handle("GET /assets/", handleStatic(http.StripPrefix("/assets/", http.FileServerFS(subFS))))
 	// Catch-all — must be last
 	mux.HandleFunc("GET /", handleError)
 
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: mux}
 
+	ln, err := retry(ctx, "bind "+cfg.ListenAddress, func() (net.Listener, error) {
+		return net.Listen("tcp", cfg.ListenAddress)
+	})
+	if err != nil {
+		return err
+	}
+
 	srvErr := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != http.ErrServerClosed {
 			srvErr <- err
 		}
 	}()

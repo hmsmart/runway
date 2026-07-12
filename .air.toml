@@ -2,6 +2,12 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
+send_interrupt = true
+kill_delay = "2s"
 cmd = "task sqlc && task templ && go build -o tmp/runway ."
 bin = "tmp/runway"
 include_ext = ["go", "html", "css", "sql", "templ"]
+# Generated code changes as a *result* of a build; watching it causes a
+# second rebuild (and process restart) per save.
+exclude_dir = ["tmp", "data", "release", ".git", ".task", "database/sqlcgen", "static/font", "static/img"]
+exclude_regex = ["_templ\\.go$"]
