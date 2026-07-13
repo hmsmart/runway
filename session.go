@@ -71,7 +71,7 @@ func requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if domains.UserFromContext(r.Context()) == nil {
 			httpError(r.Context(), w, clientIP(r), http.StatusUnauthorized,
-				"not authorized — ask the bot for a fresh link", "path", r.URL.Path)
+				"not authorized", "path", r.URL.Path)
 			return
 		}
 		next(w, r)

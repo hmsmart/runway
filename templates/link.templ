@@ -1,5 +1,7 @@
 package templates
 
+import "strings"
+
 script initPlaidLink(token string) {
     const btn = document.getElementById('link-button');
     const handler = Plaid.create({
@@ -14,7 +16,7 @@ script initPlaidLink(token string) {
 templ LinkPage(linkToken string, name string) {
     @Layout("Link Account") {
 		<article>
-		<h1>welcome to runway, { name }</h1>
+		<h1>welcome to runway, { strings.ToLower(name) }</h1>
 		<h3 class="pico-color-amber-200">before you begin</h3>
 		<p>
 			runway uses <a href="https://plaid.com" target="_blank"><span class="sc">plaid</span></a> to securely connect to your bank.

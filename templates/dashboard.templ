@@ -1,9 +1,11 @@
 package templates
 
+import "strings"
+
 templ DashboardPage(name string) {
     @Layout("dashboard") {
         <hgroup>
-            <h1>welcome back, { name }</h1>
+            <h1>welcome back, { strings.ToLower(name) }</h1>
             <p>your runway at a glance</p>
         </hgroup>
         <article>
