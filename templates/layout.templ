@@ -1,11 +1,7 @@
 // layout.templ
 package templates
 
-import (
-    "fmt"
-
-    "github.com/hmsmart/runway/domains"
-)
+import "github.com/hmsmart/runway/domains"
 
 templ Layout(title string) {
     <!DOCTYPE html>
@@ -19,7 +15,7 @@ templ Layout(title string) {
             rel="stylesheet"
             href="/assets/css/pico.classless.slate.min.css"
             >
-            <link rel="stylesheet" href="/assets/css/style.css?v=2">
+            <link rel="stylesheet" href="/assets/css/style.css?v=3">
 
         </head>
         <body>
@@ -42,25 +38,27 @@ templ Layout(title string) {
 }
 
 // Nav reads the session user off the render context (the HTTP session
-// middleware puts it there); the signed-in entries and the profile picture
-// only render for an authenticated viewer.
+// middleware puts it there) to pick the signed-in or signed-out entries.
+// The avatar is unconditional: /profilepic itself resolves the session to
+// either the user's photo or the default.
 templ Nav() {
     <nav>
         <ul>
-            <li><strong>runway</strong></li>
+            <li><strong><a href="/" >runway</a></strong></li>
         </ul>
         <ul>
-            <li><a href="/">about</a></li>
-            <li><a href="/privacy">privacy</a></li>
-            if user := domains.UserFromContext(ctx); user != nil {
+            if domains.UserFromContext(ctx) != nil {
                 <li><a href="/dashboard">dashboard</a></li>
                 <li><a href="/link">link</a></li>
-                <li>
-                    <profile-pic>
-                        <img src={ fmt.Sprintf("/assets/profpic/%s", user.ID()) } alt="profile"/>
-                    </profile-pic>
-                </li>
+                <li><a href="/logout">logout</a></li>
+            } else {
+                <li><a href="/login">login</a></li>
             }
+            <li>
+                <profile-pic>
+                    <img src="/profilepic" alt="profile"/>
+                </profile-pic>
+            </li>
         </ul>
     </nav>
 }

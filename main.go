@@ -113,7 +113,9 @@ func run(ctx context.Context) error {
 	mux.Handle("GET /dashboard", requireSession(handleDashboard))
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
-	mux.Handle("GET /assets/profpic/{userID}", requireSession(handleProfilePic(store)))
+	mux.Handle("GET /profilepic", handleProfilePic(store))
+	mux.HandleFunc("GET /login", handleLogin)
+	mux.Handle("GET /logout", handleLogout(store))
 	//Static pages
 	mux.HandleFunc("GET /privacy", handlePrivacy)
 	mux.HandleFunc("GET /{$}", handleIndex)

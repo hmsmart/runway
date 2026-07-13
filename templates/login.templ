@@ -1,0 +1,19 @@
+package templates
+
+templ LoginPage() {
+    @Layout("login") {
+        <hgroup>
+            <h1>sign in</h1>
+            <p>runway signs you in from telegram</p>
+        </hgroup>
+        <article>
+            <p>
+                open <span class="sc">telegram</span> and send <code>/dash</code> to the runway bot -
+                it will reply with a single-use sign-in link that brings you back here, signed in for 24 hours.
+            </p>
+            <p>
+                not registered yet? runway is invite-only; the <a href="/">about page</a> explains how it works.
+            </p>
+        </article>
+    }
+}

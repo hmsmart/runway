@@ -252,6 +252,18 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleLogin points browsers without a session at the bot; anyone already
+// signed in skips straight to the dashboard.
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if domains.UserFromContext(r.Context()) != nil {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
+	if err := templates.LoginPage().Render(r.Context(), w); err != nil {
+		httpError(r.Context(), w, clientIP(r), http.StatusInternalServerError, "internal error")
+	}
+}
+
 func handlePrivacy(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	err := templates.PrivacyPage().Render(r.Context(), w)
@@ -268,28 +280,29 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleProfilePic serves the viewer's own avatar: the session user's cached
+// photo, or the default for anonymous visitors (and photo-cache misses). The
+// session is the identity, so the URL carries no user ID at all.
 func handleProfilePic(store *database.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-		userID := strings.ToLower(r.PathValue("userID"))
-		// Sessions gate the route, but photos are still keyed by user ID:
-		// only serve the viewer their own picture.
-		user := domains.UserFromContext(r.Context())
-		if user.ID() != userID {
-			httpError(r.Context(), w, ip, http.StatusNotFound, "not found")
+		photo := domains.GetDefaultPhoto()
+		if user := domains.UserFromContext(r.Context()); user != nil {
+			if cached := store.TGPhotos.Get(user.ID()); cached != nil {
+				p := cached.Value()
+				photo = &p
+			}
+		}
+		// One URL answers differently per session, so shared caches must not
+		// store it and the browser revalidates on login/logout; the ETag
+		// (Telegram's stable per-file ID) makes revalidation a cheap 304.
+		etag := `"` + photo.ID() + `"`
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "private, no-cache")
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		slog.Info("load profile pic", "for", ip, "userid", userID)
-		photo := domains.GetDefaultPhoto()
-		if cached := store.TGPhotos.Get(userID); cached != nil {
-			p := cached.Value()
-			photo = &p
-		}
 		w.Header().Set("Content-Type", photo.MIME())
-		// Sessions outlive the photo cache, so fall back to the default
-		// instead of a broken image; keep browser caching short so a real
-		// photo shows up soon after the cache refills.
-		w.Header().Set("Cache-Control", "max-age=3600")
 		w.Write(photo.Data())
 	}
 }

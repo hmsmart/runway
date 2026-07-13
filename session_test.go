@@ -119,6 +119,30 @@ func TestMagicLinkSession(t *testing.T) {
 	}
 }
 
+// TestLogin checks the login page tells anonymous visitors how to sign in
+// and bounces already-authenticated ones to the dashboard.
+func TestLogin(t *testing.T) {
+	store := newTestStore(t)
+	user := testUser(t)
+	h := withSessionUser(store, http.HandlerFunc(handleLogin))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/login", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "/dash") {
+		t.Fatalf("want login page mentioning /dash, got %d: %.200s", rec.Code, rec.Body.String())
+	}
+
+	srec := httptest.NewRecorder()
+	createSession(srec, store, user)
+	req := httptest.NewRequest("GET", "/login", nil)
+	req.AddCookie(srec.Result().Cookies()[0])
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/dashboard" {
+		t.Fatalf("signed-in /login: want 303 to /dashboard, got %d to %q", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
 func TestRequireSessionRejectsAnonymous(t *testing.T) {
 	store := newTestStore(t)
 	gated := withSessionUser(store, requireSession(handleDashboard))
@@ -138,9 +162,14 @@ func TestNavAuthenticated(t *testing.T) {
 	if err := templates.IndexPage().Render(context.Background(), &anon); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	for _, frag := range []string{`href="/dashboard"`, `href="/link"`, "profpic"} {
+	for _, frag := range []string{`href="/dashboard"`, `href="/link"`, `href="/logout"`} {
 		if strings.Contains(anon.String(), frag) {
 			t.Errorf("anonymous nav should not contain %s", frag)
+		}
+	}
+	for _, frag := range []string{`href="/login"`, `src="/profilepic"`} {
+		if !strings.Contains(anon.String(), frag) {
+			t.Errorf("anonymous nav should contain %s", frag)
 		}
 	}
 
@@ -149,9 +178,60 @@ func TestNavAuthenticated(t *testing.T) {
 	if err := templates.IndexPage().Render(ctx, &authed); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	for _, frag := range []string{`href="/dashboard"`, `href="/link"`, "/assets/profpic/user-1"} {
+	for _, frag := range []string{`href="/dashboard"`, `href="/link"`, `href="/logout"`, `src="/profilepic"`} {
 		if !strings.Contains(authed.String(), frag) {
 			t.Errorf("authenticated nav should contain %s", frag)
 		}
+	}
+}
+
+// TestProfilePic checks /profilepic resolves the avatar from the session:
+// the signed-in user's photo, the default for everyone else.
+func TestProfilePic(t *testing.T) {
+	store := newTestStore(t)
+	user := testUser(t)
+	realPhoto := domains.NewPhoto(1, 1, []byte("real-photo-bytes"), "p1")
+	store.TGPhotos.Set(user.ID(), *realPhoto, time.Minute)
+
+	h := withSessionUser(store, handleProfilePic(store))
+	get := func(cookie *http.Cookie) string {
+		req := httptest.NewRequest("GET", "/profilepic", nil)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /profilepic: want 200, got %d", rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	if strings.Contains(get(nil), "real-photo-bytes") {
+		t.Fatal("anonymous request must not receive a real photo")
+	}
+
+	rec := httptest.NewRecorder()
+	createSession(rec, store, user)
+	cookie := rec.Result().Cookies()[0]
+	if !strings.Contains(get(cookie), "real-photo-bytes") {
+		t.Fatal("session user should receive their own photo")
+	}
+
+	// Logout kills the session server-side and expires the cookie; the same
+	// browser cookie is now worthless.
+	logout := withSessionUser(store, handleLogout(store))
+	req := httptest.NewRequest("GET", "/logout", nil)
+	req.AddCookie(cookie)
+	lrec := httptest.NewRecorder()
+	logout.ServeHTTP(lrec, req)
+	if lrec.Code != http.StatusSeeOther || lrec.Header().Get("Location") != "/" {
+		t.Fatalf("logout: want 303 to /, got %d to %q", lrec.Code, lrec.Header().Get("Location"))
+	}
+	if cleared := lrec.Result().Cookies(); len(cleared) != 1 || cleared[0].MaxAge >= 0 {
+		t.Fatalf("logout should expire the session cookie, got %v", cleared)
+	}
+	if strings.Contains(get(cookie), "real-photo-bytes") {
+		t.Fatal("stale cookie after logout must not resolve to a photo")
 	}
 }

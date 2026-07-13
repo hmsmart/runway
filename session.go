@@ -46,6 +46,26 @@ func withSessionUser(store *database.Store, next http.Handler) http.Handler {
 	})
 }
 
+// handleLogout kills the browser's session: the cache entry dies server-side
+// and the cookie is expired, then the visitor lands back on the index.
+func handleLogout(store *database.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie(sessionCookieName); err == nil {
+			store.Sessions.Delete(c.Value)
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
 // requireSession rejects requests whose context carries no session user.
 func requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
