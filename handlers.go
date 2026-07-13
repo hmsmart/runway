@@ -71,21 +71,24 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		store.LinkTokens.Delete(body.LinkToken)
 		persistCtx := context.WithoutCancel(r.Context())
 		accessToken := exchangeResponse.GetAccessToken()
-		slog.Info("successfully linked account", "for", ip)
-		slog.Info("fetch associated accounts", "for", ip)
+		// Log the item id as soon as the exchange yields it: if anything past
+		// this point fails, the item exists at Plaid but not in our database,
+		// and this id is what support/repair needs.
+		slog.Info("successfully linked account", "for", ip, "item", exchangeResponse.GetItemId())
+		slog.Info("fetch associated accounts", "for", ip, "item", exchangeResponse.GetItemId())
 		callCtx, cancel = context.WithTimeout(persistCtx, cfg.PlaidTimeout)
 		defer cancel()
 		itemRequest := plaid.NewItemGetRequest(accessToken)
 		itemResp, _, err := plaidClient.PlaidApi.ItemGet(callCtx).ItemGetRequest(*itemRequest).Execute()
 		if err != nil {
-			httpError(r.Context(), w, ip, http.StatusBadGateway, "bad gateway", "err", err)
+			httpError(r.Context(), w, ip, http.StatusBadGateway, "bad gateway", "item", exchangeResponse.GetItemId(), "err", err)
 			return
 		}
 		item := itemResp.GetItem()
-		slog.Info("retrieved item data", "for", ip)
+		slog.Info("retrieved item data", "for", ip, "item", item.ItemId)
 		atenc, err := EncryptColumnSecret(accessToken, item.ItemId, cfg.DBCryptKey)
 		if err != nil {
-			httpError(r.Context(), w, ip, http.StatusInternalServerError, "database err", "err", err)
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "database err", "item", item.ItemId, "err", err)
 			return
 		}
 		err = store.CreateItem(persistCtx, sqlcgen.CreateItemParams{
@@ -96,10 +99,10 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 			Status:          "active",
 		})
 		if err != nil {
-			httpError(r.Context(), w, ip, http.StatusInternalServerError, "database err", "err", err)
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "database err", "item", item.ItemId, "err", err)
 			return
 		}
-		slog.Info("successfully added new item to database", "for", ip)
+		slog.Info("successfully added new item to database", "for", ip, "item", item.ItemId)
 		firstItem := false
 		if n, err := store.CountItemsByUser(persistCtx, tgUser.ID()); err != nil {
 			slog.Error("failed to count user items", "for", ip, "err", err)
@@ -203,6 +206,11 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 		plaidRequest.SetWebhook(cfg.PlaidWebhookURL)
 		plaidRequest.SetAccountFilters(accountFilters)
 		plaidRequest.SetUser(user)
+		// Plaid only pulls 90 days of history by default; ask for more so the
+		// initial sync backfills real history.
+		transactions := plaid.NewLinkTokenTransactions()
+		transactions.SetDaysRequested(cfg.PlaidHistoryDays)
+		plaidRequest.SetTransactions(*transactions)
 		callCtx, cancel := context.WithTimeout(r.Context(), cfg.PlaidTimeout)
 		defer cancel()
 		linkTokenCreateResp, httpResp, err := plaidClient.PlaidApi.LinkTokenCreate(callCtx).LinkTokenCreateRequest(*plaidRequest).Execute()

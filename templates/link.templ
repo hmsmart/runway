@@ -4,13 +4,42 @@ import "strings"
 
 script initPlaidLink(token string) {
     const btn = document.getElementById('link-button');
+    const status = document.getElementById('status');
+    const openLink = () => handler.open();
     const handler = Plaid.create({
         token: token,
         onSuccess: async (publicToken, metadata) => {
-            // ...
+            // The link token is spent either way now, so the button never
+            // reopens Plaid: it becomes a spinner, then a dashboard link.
+            btn.removeEventListener('click', openLink);
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+            btn.textContent = 'linking...';
+            let ok = false;
+            try {
+                const res = await fetch('/exchange-token', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({public_token: publicToken, link_token: token})
+                });
+                ok = res.ok;
+            } catch (_) {}
+            btn.removeAttribute('aria-busy');
+            if (ok) {
+                btn.disabled = false;
+                btn.textContent = 'go to your dashboard';
+                btn.addEventListener('click', () => window.location.href = '/dashboard');
+                status.textContent = 'linked: ' + (metadata.institution?.name ?? 'account');
+            } else {
+                btn.textContent = 'link failed';
+                status.textContent = 'something went wrong — ask the bot for a fresh link';
+            }
+        },
+        onExit: (err) => {
+            if (err) status.textContent = err.display_message || 'link exited with an error';
         }
     });
-    btn.addEventListener('click', () => handler.open());
+    btn.addEventListener('click', openLink);
 }
 
 templ LinkPage(linkToken string, name string) {

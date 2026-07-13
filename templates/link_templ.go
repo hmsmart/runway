@@ -12,18 +12,47 @@ import "strings"
 
 func initPlaidLink(token string) templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_initPlaidLink_ee78`,
-		Function: `function __templ_initPlaidLink_ee78(token){const btn = document.getElementById('link-button');
+		Name: `__templ_initPlaidLink_09b6`,
+		Function: `function __templ_initPlaidLink_09b6(token){const btn = document.getElementById('link-button');
+    const status = document.getElementById('status');
+    const openLink = () => handler.open();
     const handler = Plaid.create({
         token: token,
         onSuccess: async (publicToken, metadata) => {
-            // ...
+            // The link token is spent either way now, so the button never
+            // reopens Plaid: it becomes a spinner, then a dashboard link.
+            btn.removeEventListener('click', openLink);
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+            btn.textContent = 'linking...';
+            let ok = false;
+            try {
+                const res = await fetch('/exchange-token', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({public_token: publicToken, link_token: token})
+                });
+                ok = res.ok;
+            } catch (_) {}
+            btn.removeAttribute('aria-busy');
+            if (ok) {
+                btn.disabled = false;
+                btn.textContent = 'go to your dashboard';
+                btn.addEventListener('click', () => window.location.href = '/dashboard');
+                status.textContent = 'linked: ' + (metadata.institution?.name ?? 'account');
+            } else {
+                btn.textContent = 'link failed';
+                status.textContent = 'something went wrong — ask the bot for a fresh link';
+            }
+        },
+        onExit: (err) => {
+            if (err) status.textContent = err.display_message || 'link exited with an error';
         }
     });
-    btn.addEventListener('click', () => handler.open());
+    btn.addEventListener('click', openLink);
 }`,
-		Call:       templ.SafeScript(`__templ_initPlaidLink_ee78`, token),
-		CallInline: templ.SafeScriptInline(`__templ_initPlaidLink_ee78`, token),
+		Call:       templ.SafeScript(`__templ_initPlaidLink_09b6`, token),
+		CallInline: templ.SafeScriptInline(`__templ_initPlaidLink_09b6`, token),
 	}
 }
 
@@ -67,7 +96,7 @@ func LinkPage(linkToken string, name string) templ.Component {
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(strings.ToLower(name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/link.templ`, Line: 19, Col: 48}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/link.templ`, Line: 48, Col: 48}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {

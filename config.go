@@ -32,7 +32,10 @@ type Config struct {
 	PlaidProducts     string            `envconfig:"PLAID_PRODUCTS" default:"transactions"`
 	PlaidCountryCodes string            `envconfig:"PLAID_COUNTRY_CODES" default:"US"`
 	PlaidWebhookURL   string            `envconfig:"PLAID_WEBHOOK_URL"`
-	TokenTTL          time.Duration     `envconfig:"TOKEN_TTL" default:"30m"`
+	// PlaidHistoryDays is how much transaction history Plaid pulls when an
+	// item is first linked (Plaid caps this at 730; its default is only 90).
+	PlaidHistoryDays int32         `envconfig:"PLAID_HISTORY_DAYS" default:"730"`
+	TokenTTL         time.Duration `envconfig:"TOKEN_TTL" default:"30m"`
 
 	// Parsed from PlaidProducts / PlaidCountryCodes; used when creating link tokens.
 	PlaidProductList     []plaid.Products    `envconfig:"-"`
@@ -66,6 +69,10 @@ func LoadSettings() *Config {
 	}
 	if cfg.TokenTTL < time.Minute {
 		slog.Error("TOKEN_TTL must be at least one minute")
+		os.Exit(1)
+	}
+	if cfg.PlaidHistoryDays < 1 || cfg.PlaidHistoryDays > 730 {
+		slog.Error("PLAID_HISTORY_DAYS must be between 1 and 730")
 		os.Exit(1)
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
