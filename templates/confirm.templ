@@ -1,0 +1,19 @@
+package templates
+
+// ConfirmPage is the interstitial a magic link lands on. The GET that renders
+// it leaves the token intact; only the POST consumes it. That way link
+// previewers and Telegram's in-app browser can fetch the URL without burning
+// the token before the user's real browser arrives.
+templ ConfirmPage(action string, token string) {
+    @Layout("sign in") {
+        <hgroup>
+            <h1>continue to runway</h1>
+        </hgroup>
+        <article>
+            <form method="post" action={ templ.URL(action) }>
+                <input type="hidden" name="token" value={ token }/>
+                <button type="submit">continue</button>
+            </form>
+        </article>
+    }
+}

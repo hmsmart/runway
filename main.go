@@ -107,8 +107,13 @@ func run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealthz(store))
 	mux.Handle("GET /link", handleLink(plaidClient, cfg, store))
+	mux.Handle("POST /link", handleMagicConfirm(store, "/link"))
+	mux.Handle("GET /dash", handleDash(store))
+	mux.Handle("POST /dash", handleMagicConfirm(store, "/dashboard"))
+	mux.Handle("GET /dashboard", requireSession(handleDashboard))
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
+	mux.Handle("GET /assets/profpic/{userID}", requireSession(handleProfilePic(store)))
 	//Static pages
 	mux.HandleFunc("GET /privacy", handlePrivacy)
 	mux.HandleFunc("GET /{$}", handleIndex)
@@ -117,7 +122,9 @@ func run(ctx context.Context) error {
 	// Catch-all — must be last
 	mux.HandleFunc("GET /", handleError)
 
-	srv := &http.Server{Addr: cfg.ListenAddress, Handler: mux}
+	// Session resolution wraps everything so any page (and the templates'
+	// shared Nav) can see who is logged in via the request context.
+	srv := &http.Server{Addr: cfg.ListenAddress, Handler: withSessionUser(store, mux)}
 
 	ln, err := retry(ctx, "bind "+cfg.ListenAddress, func() (net.Listener, error) {
 		return net.Listen("tcp", cfg.ListenAddress)

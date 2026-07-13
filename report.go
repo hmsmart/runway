@@ -12,6 +12,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/domains"
 )
 
 // clockFormat is the stored shape of a report time: zero-padded 24h, so
@@ -27,7 +28,7 @@ const reportUsage = "Send <code>/report</code> followed by a time to get your ru
 // "/report [daily] TIME" schedules, "/report off" clears, bare "/report"
 // shows the current setting.
 func (t *TelegramBot) handleReport(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	slog.Info("called report", "chatID", chatID)
 	args := strings.Fields(update.Message.Text)[1:]

@@ -1,0 +1,16 @@
+package templates
+
+templ DashboardPage(name string) {
+    @Layout("dashboard") {
+        <hgroup>
+            <h1>welcome back, { name }</h1>
+            <p>your runway at a glance</p>
+        </hgroup>
+        <article>
+            <p>
+                the dashboard is still under construction — for now, your daily
+                report and account tools live in the <span class="sc">telegram</span> chat.
+            </p>
+        </article>
+    }
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/domains"
 	"github.com/hmsmart/runway/templates"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
@@ -120,21 +121,64 @@ func handleTokenExchange(plaidClient *plaid.APIClient, store *database.Store, cf
 		w.Write([]byte("linked"))
 	}
 }
+
+// consumeMagicToken redeems a single-use Telegram magic-link token and logs
+// the browser in: the cached user becomes a 24h session. Returns nil if the
+// token is unknown or already spent.
+func consumeMagicToken(w http.ResponseWriter, store *database.Store, token string) *domains.User {
+	cached := store.TGTokens.Get(token)
+	if cached == nil {
+		return nil
+	}
+	// Magic tokens are single-use: dead once redeemed. The cached user is
+	// the identity here — it was written by an authenticated Telegram chat.
+	store.TGTokens.Delete(token)
+	user := cached.Value()
+	createSession(w, store, user)
+	return &user
+}
+
+// handleMagicConfirm is the POST target of the confirm page: it burns the
+// magic token, starts the session, and bounces to dest. Consumption lives
+// behind a POST so link previewers and in-app browsers that merely GET the
+// magic URL can't spend the token before the user's real browser does. A
+// replayed POST from a browser that already holds a session passes through.
+func handleMagicConfirm(store *database.Store, dest string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		if user := consumeMagicToken(w, store, r.FormValue("token")); user != nil {
+			slog.Info("magic token confirmed", "for", ip, "user", user.Username(), "dest", dest)
+		} else if domains.UserFromContext(r.Context()) == nil {
+			// No live token and no prior session: nothing vouches for this
+			// browser.
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad token")
+			return
+		}
+		http.Redirect(w, r, dest, http.StatusSeeOther)
+	}
+}
+
 func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		slog.Info("begin link request", "for", ip)
-		token := r.URL.Query().Get("token")
-		cached := store.TGTokens.Get(token)
-		if cached == nil {
-			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad token")
+		// A magic link lands here with a live token: show the confirm step
+		// rather than consuming anything, so a preview fetch can't burn the
+		// token (or a Plaid call). The confirm POST creates the session and
+		// redirects back here, joining the nav's session-only path below.
+		if token := r.URL.Query().Get("token"); store.TGTokens.Has(token) {
+			if err := templates.ConfirmPage("/link", token).Render(r.Context(), w); err != nil {
+				slog.Error("failed to render confirm page", "for", ip, "err", err)
+			}
 			return
 		}
-		// Link tokens are single-use: dead once redeemed. The cached user is
-		// the identity here — it was written by an authenticated /link chat.
-		store.TGTokens.Delete(token)
-		tgUser := cached.Value()
-		slog.Info("link token redeemed", "for", ip, "user", tgUser.Username())
+		sessionUser := domains.UserFromContext(r.Context())
+		if sessionUser == nil {
+			httpError(r.Context(), w, ip, http.StatusUnauthorized, "not authorized — ask the bot for a fresh link")
+			return
+		}
+		tgUser := *sessionUser
+		slog.Info("link request authenticated", "for", ip, "user", tgUser.Username())
 		user := plaid.LinkTokenCreateRequestUser{
 			ClientUserId: tgUser.ID(),
 		}
@@ -179,6 +223,35 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 	}
 }
 
+// handleDash is where a /dash magic link lands: a live token gets the
+// confirm step (the POST does the consuming), an existing session skips
+// straight to the dashboard, and anything else is a dead link.
+func handleDash(store *database.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		if token := r.URL.Query().Get("token"); store.TGTokens.Has(token) {
+			if err := templates.ConfirmPage("/dash", token).Render(r.Context(), w); err != nil {
+				slog.Error("failed to render confirm page", "for", ip, "err", err)
+			}
+			return
+		}
+		if domains.UserFromContext(r.Context()) != nil {
+			http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+			return
+		}
+		httpError(r.Context(), w, ip, http.StatusBadRequest, "bad token")
+	}
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	// requireSession guarantees a user is present.
+	user := domains.UserFromContext(r.Context())
+	if err := templates.DashboardPage(user.FirstName()).Render(r.Context(), w); err != nil {
+		httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error")
+	}
+}
+
 func handlePrivacy(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	err := templates.PrivacyPage().Render(r.Context(), w)
@@ -192,6 +265,32 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	err := templates.IndexPage().Render(r.Context(), w)
 	if err != nil {
 		httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func handleProfilePic(store *database.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		userID := strings.ToLower(r.PathValue("userID"))
+		// Sessions gate the route, but photos are still keyed by user ID:
+		// only serve the viewer their own picture.
+		user := domains.UserFromContext(r.Context())
+		if user.ID() != userID {
+			httpError(r.Context(), w, ip, http.StatusNotFound, "not found")
+			return
+		}
+		slog.Info("load profile pic", "for", ip, "userid", userID)
+		photo := domains.GetDefaultPhoto()
+		if cached := store.TGPhotos.Get(userID); cached != nil {
+			p := cached.Value()
+			photo = &p
+		}
+		w.Header().Set("Content-Type", photo.MIME())
+		// Sessions outlive the photo cache, so fall back to the default
+		// instead of a broken image; keep browser caching short so a real
+		// photo shows up soon after the cache refills.
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Write(photo.Data())
 	}
 }
 

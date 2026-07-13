@@ -1,6 +1,12 @@
 // layout.templ
 package templates
 
+import (
+    "fmt"
+
+    "github.com/hmsmart/runway/domains"
+)
+
 templ Layout(title string) {
     <!DOCTYPE html>
     <html lang="en">
@@ -35,6 +41,9 @@ templ Layout(title string) {
     </html>
 }
 
+// Nav reads the session user off the render context (the HTTP session
+// middleware puts it there); the signed-in entries and the profile picture
+// only render for an authenticated viewer.
 templ Nav() {
     <nav>
         <ul>
@@ -43,6 +52,15 @@ templ Nav() {
         <ul>
             <li><a href="/">about</a></li>
             <li><a href="/privacy">privacy</a></li>
+            if user := domains.UserFromContext(ctx); user != nil {
+                <li><a href="/dashboard">dashboard</a></li>
+                <li><a href="/link">link</a></li>
+                <li>
+                    <profile-pic>
+                        <img src={ fmt.Sprintf("/assets/profpic/%s", user.ID()) } alt="profile"/>
+                    </profile-pic>
+                </li>
+            }
         </ul>
     </nav>
 }

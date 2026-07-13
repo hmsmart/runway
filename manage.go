@@ -12,6 +12,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/domains"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -32,7 +33,7 @@ func formatMoney(amount float64, code *string) string {
 // grouped by institution and numbered for /unlink. Balances are whatever the
 // last sync wrote, so each institution header carries its item's sync time.
 func (t *TelegramBot) handleAccounts(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	items, err := t.store.ListItemsByUser(ctx, user.ID())
 	if err != nil {
@@ -96,7 +97,7 @@ func (t *TelegramBot) handleAccounts(ctx context.Context, b *bot.Bot, update *mo
 // handleUnlink resolves /unlink <n> to an item and asks for confirmation;
 // the actual removal happens in handleUnlinkCallback.
 func (t *TelegramBot) handleUnlink(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) != 2 {
@@ -137,7 +138,7 @@ func (t *TelegramBot) handleUnlink(ctx context.Context, b *bot.Bot, update *mode
 }
 
 func (t *TelegramBot) handleUnlinkCallback(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	parts := strings.SplitN(update.CallbackQuery.Data, ":", 3)
 	if len(parts) != 3 {
 		t.answerCallback(ctx, b, update, "Something went wrong")
@@ -198,7 +199,7 @@ func (t *TelegramBot) handleUnregister(ctx context.Context, b *bot.Bot, update *
 }
 
 func (t *TelegramBot) handleUnregisterCallback(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	if update.CallbackQuery.Data != "unreg:yes" {
 		t.editCallbackMessage(ctx, b, update, "✖️ Cancelled — your account is safe.")
 		t.answerCallback(ctx, b, update, "")

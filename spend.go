@@ -14,6 +14,7 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
+	"github.com/hmsmart/runway/domains"
 )
 
 // EMA smoothing factors, alpha = 2/(N+1) for an N-day EMA.
@@ -219,7 +220,7 @@ func todaysCommitments(txs []sqlcgen.ListSpendTransactionsByUserRow, today strin
 }
 
 func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	slog.Info("called runway", "chatID", chatID)
 	msg, err := t.buildRunwayReport(ctx, user.ID())

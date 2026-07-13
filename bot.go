@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -98,9 +100,22 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 			// Scan can fail mid-row (e.g. a malformed column value) and leave
 			// the earlier fields populated; don't act on a half-read user.
 			row = sqlcgen.User{}
+		} else {
+			slog.Info("checking for existing user profile", "chatID", chatID, "userID", row.ID)
+			has := t.store.TGPhotos.Has(row.ID)
+			if !has {
+				slog.Info("i don't have it going to fetch it", "chatID", chatID, "userID", row.ID)
+				pic := t.fetchUserPhoto(ctx, *row.TgID)
+				t.store.TGPhotos.Set(row.ID, *pic, 24*time.Hour)
+
+			}
 		}
-		row.TgFirstName = &update.Message.From.FirstName
-		next(WithUser(ctx, domains.NewUser(row)), b, update)
+		// Callback updates have no Message, so only messages carry a sender
+		// name to stamp onto the row.
+		if update.Message != nil && update.Message.From != nil {
+			row.TgFirstName = &update.Message.From.FirstName
+		}
+		next(domains.WithUser(ctx, domains.NewUser(row)), b, update)
 	}
 }
 
@@ -110,7 +125,7 @@ func (t *TelegramBot) fetchUser(next bot.HandlerFunc) bot.HandlerFunc {
 func (t *TelegramBot) syncCommands(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if update.Message != nil {
-			if err := t.setCommandMenu(ctx, update.Message.Chat.ID, UserFromContext(ctx)); err != nil {
+			if err := t.setCommandMenu(ctx, update.Message.Chat.ID, domains.UserFromContext(ctx)); err != nil {
 				slog.Error("failed to set bot command menu", "chatID", update.Message.Chat.ID, "err", err)
 			}
 		}
@@ -125,7 +140,7 @@ func (t *TelegramBot) syncCommands(next bot.HandlerFunc) bot.HandlerFunc {
 func (t *TelegramBot) requirePermission(perm domains.Permission) middleware {
 	return func(next bot.HandlerFunc) bot.HandlerFunc {
 		return func(ctx context.Context, b *bot.Bot, update *models.Update) {
-			user := UserFromContext(ctx)
+			user := domains.UserFromContext(ctx)
 			var allowed bool
 			if perm == domains.PermissionUnregistered {
 				allowed = user == nil
@@ -153,7 +168,7 @@ func (t *TelegramBot) deny(ctx context.Context, b *bot.Bot, update *models.Updat
 	// Nil means genuinely unregistered; anyone else who fails a permission
 	// check (e.g. /invite without invite rights) is already registered, so
 	// telling them to /register would just send them in a circle.
-	if UserFromContext(ctx) == nil {
+	if domains.UserFromContext(ctx) == nil {
 		t.sendText(ctx, b, update.Message.Chat.ID,
 			"You're not authorized. If you have an invite code, send <code>/register</code> followed by the code to get started.")
 		return
@@ -208,6 +223,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleReport, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/dash", bot.MatchTypeExact,
+		chain(t.handleDash, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/accounts", bot.MatchTypeExact,
 		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	// Exact must be registered before Prefix: handlers are tried in order and
@@ -244,7 +261,7 @@ func (t *TelegramBot) RegisterHandlers() {
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("called start", "chatID", update.Message.Chat.ID)
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	if user.Has(domains.PermissionActive) {
 		if user.Discretionary() == nil {
 			t.sendText(ctx, b, update.Message.Chat.ID,
@@ -272,7 +289,7 @@ func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *model
 // pitch and setup steps, an active user gets the full command reference plus
 // what the Spread/Exclude transaction buttons do.
 func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	var text string
 	switch {
@@ -294,6 +311,7 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"<code>/runway</code> — yesterday's spend, your daily rates, and days of cash left\n" +
 			"<code>/report [TIME]</code> — get the runway report every day at TIME (e.g. <code>/report 8:00</code>); <code>/report off</code> stops it\n" +
 			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
+			"<code>/dash</code> — sign in to your web dashboard\n" +
 			"<code>/link</code> — connect a bank account\n" +
 			"<code>/accounts</code> — list your linked accounts and balances\n" +
 			"<code>/unlink [N]</code> — list your accounts, or unlink one by number\n"
@@ -316,7 +334,7 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 }
 
 func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	slog.Info("called ping", "chatID", update.Message.Chat.ID, "registered", user != nil)
 	pong := "Pongthenticated"
 	if user == nil {
@@ -402,7 +420,7 @@ func parseBudget(s string) (float64, error) {
 // handleBudget sets or shows the user's monthly discretionary budget. Setting
 // it for the first time completes setup and unlocks /link.
 func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *models.Update) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	slog.Info("called budget", "chatID", update.Message.Chat.ID)
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) == 1 {
@@ -446,7 +464,7 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 }
 
 func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *models.Update) {
-	invUser := UserFromContext(ctx)
+	invUser := domains.UserFromContext(ctx)
 	inviteCode := RandomToken(5, Base32)
 	userID, err := uuid.NewV7()
 	if err != nil {
@@ -469,38 +487,129 @@ func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *mode
 }
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
-	user := UserFromContext(ctx)
-	if user == nil {
-		slog.Error("something happened where a user was allowed to /link without proper context")
-		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
-		return
-	}
+	user := domains.UserFromContext(ctx)
 	// Linking is gated on a budget: without one there's nothing to track
 	// spending against, so finish setup first.
-	if user.Discretionary() == nil {
+	if user != nil && user.Discretionary() == nil {
 		slog.Info("link attempted without budget set", "chatID", update.Message.Chat.ID)
 		t.sendText(ctx, b, update.Message.Chat.ID,
 			"Almost there — before linking an account, I need your monthly discretionary budget so I have something to track your spending against.\n\n"+budgetExplainer)
+		return
+	}
+	t.sendMagicLink(ctx, b, update.Message.Chat.ID, user, "/link",
+		formatLinkMessage(t.cfg.TokenTTL), "🔗 Link Account")
+}
+
+// handleDash sends a magic link that signs the user into the web dashboard.
+func (t *TelegramBot) handleDash(ctx context.Context, b *bot.Bot, update *models.Update) {
+	slog.Info("got dash request", "chatID", update.Message.Chat.ID)
+	t.sendMagicLink(ctx, b, update.Message.Chat.ID, domains.UserFromContext(ctx), "/dash",
+		formatDashMessage(t.cfg.TokenTTL), "📊 Open Dashboard")
+}
+
+// sendMagicLink mints a single-use token identifying user and sends a button
+// pointing at the web side's path carrying it. Consuming the token there
+// authenticates the browser as this user and starts a session.
+func (t *TelegramBot) sendMagicLink(ctx context.Context, b *bot.Bot, chatID int64, user *domains.User, path, text, button string) {
+	if user == nil {
+		// requirePermission should make this unreachable; never mint a token
+		// for nobody.
+		slog.Error("magic link requested without user in context", "chatID", chatID, "path", path)
+		t.sendText(ctx, b, chatID, errTryLater)
 		return
 	}
 	token := RandomToken(16, Base64)
 	t.store.TGTokens.Set(token, *user, t.cfg.TokenTTL)
 	params := url.Values{}
 	params.Set("token", token)
-	linkURL := t.cfg.BaseURL + "/link?" + params.Encode()
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   formatLinkMessage(t.cfg.TokenTTL),
+		ChatID: chatID,
+		Text:   text,
 		ReplyMarkup: &models.InlineKeyboardMarkup{
 			InlineKeyboard: [][]models.InlineKeyboardButton{{
-				{Text: "🔗 Link Account", URL: linkURL},
+				{Text: button, URL: t.cfg.BaseURL + path + "?" + params.Encode()},
 			}},
 		},
-		ParseMode: "HTML",
+		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil {
-		slog.Error("failed to send link message", "chatID", update.Message.Chat.ID, "err", err)
+		slog.Error("failed to send magic link", "chatID", chatID, "path", path, "err", err)
 	}
+}
+
+// maxProfilePhotoBytes caps a profile photo download. The smallest Telegram
+// size is 160px (a few KB), so the cap only guards against a misbehaving
+// response, not legitimate photos.
+const maxProfilePhotoBytes = 1 << 20
+
+// fetchUserPhotoTimeout bounds the whole photo fetch (two API calls plus the
+// CDN download). The photo is cosmetic, so a slow fetch should degrade to the
+// default photo rather than stall the caller.
+const fetchUserPhotoTimeout = 10 * time.Second
+
+// redactURLError strips the request URL from HTTP client errors before they
+// are logged: Telegram file download URLs embed the bot token.
+func redactURLError(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Err
+	}
+	return err
+}
+
+// fetchUserPhoto downloads the user's smallest profile photo. Every failure
+// path — no photo set (or hidden by privacy settings), API errors, a bad
+// download — logs and falls back to the shared default photo, so callers
+// always get a usable *Photo.
+func (t *TelegramBot) fetchUserPhoto(ctx context.Context, tgID int64) *domains.Photo {
+	ctx, cancel := context.WithTimeout(ctx, fetchUserPhotoTimeout)
+	defer cancel()
+	photos, err := t.bot.GetUserProfilePhotos(ctx, &bot.GetUserProfilePhotosParams{
+		UserID: tgID,
+		Limit:  1,
+	})
+	if err != nil {
+		slog.Warn("failed to list profile photos", "chatID", tgID, "err", err)
+		return domains.GetDefaultPhoto()
+	}
+	if len(photos.Photos) == 0 || len(photos.Photos[0]) == 0 {
+		slog.Info("user has no profile photo, using default", "chatID", tgID)
+		return domains.GetDefaultPhoto()
+	}
+	// Sizes come back smallest-first; index 0 is the 160px thumbnail.
+	smallest := photos.Photos[0][0]
+	file, err := t.bot.GetFile(ctx, &bot.GetFileParams{FileID: smallest.FileID})
+	if err != nil {
+		slog.Warn("failed to resolve profile photo file", "chatID", tgID, "fileID", smallest.FileID, "err", err)
+		return domains.GetDefaultPhoto()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.bot.FileDownloadLink(file), nil)
+	if err != nil {
+		slog.Warn("failed to build profile photo request", "chatID", tgID, "err", redactURLError(err))
+		return domains.GetDefaultPhoto()
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("failed to download profile photo", "chatID", tgID, "fileID", smallest.FileID, "err", redactURLError(err))
+		return domains.GetDefaultPhoto()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("profile photo download rejected", "chatID", tgID, "fileID", smallest.FileID, "status", resp.Status)
+		return domains.GetDefaultPhoto()
+	}
+	// Read one byte past the cap so a photo of exactly the limit passes but
+	// anything larger is detected as truncated rather than silently clipped.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxProfilePhotoBytes+1))
+	if err != nil {
+		slog.Warn("failed to read profile photo body", "chatID", tgID, "fileID", smallest.FileID, "err", err)
+		return domains.GetDefaultPhoto()
+	}
+	if len(data) > maxProfilePhotoBytes {
+		slog.Warn("profile photo exceeds size cap", "chatID", tgID, "fileID", smallest.FileID, "cap", maxProfilePhotoBytes)
+		return domains.GetDefaultPhoto()
+	}
+	return domains.NewPhoto(uint(smallest.Width), uint(smallest.Height), data, smallest.FileUniqueID)
 }
 
 func (t *TelegramBot) handleMenu(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -537,7 +646,7 @@ func (t *TelegramBot) handleMenu(ctx context.Context, b *bot.Bot, update *models
 // logged, not surfaced: the classification itself already committed, and the
 // next sync or hourly sweep will recompute the same series.
 func (t *TelegramBot) recomputeSpend(ctx context.Context) {
-	user := UserFromContext(ctx)
+	user := domains.UserFromContext(ctx)
 	if user == nil {
 		return
 	}
@@ -628,6 +737,7 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 			cmds = append(cmds,
 				models.BotCommand{Command: "runway", Description: "Yesterday's spend and days of cash left"},
 				models.BotCommand{Command: "report", Description: "Schedule a daily runway report"},
+				models.BotCommand{Command: "dash", Description: "Sign in to your web dashboard"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},
 				models.BotCommand{Command: "unlink", Description: "List accounts, or unlink one by number"},
@@ -925,6 +1035,14 @@ func formatLinkMessage(ttl time.Duration) string {
 			"This link is <b>single-use</b> and expires in %s.\n\n"+
 			"Once it's linked, I'll pull the last %d days of transactions and start tracking them against your budget.",
 		humanDuration(ttl), notifyWindowDays)
+}
+
+func formatDashMessage(ttl time.Duration) string {
+	return fmt.Sprintf(
+		"📊 <b>Your Runway Dashboard</b>\n\n"+
+			"Tap the link below to open your dashboard in the browser. "+
+			"The link is <b>single-use</b> and expires in %s; once opened, you'll stay signed in for %s.",
+		humanDuration(ttl), humanDuration(database.SessionTTL))
 }
 
 // humanDuration renders a duration for user-facing text, e.g. "30 minutes".

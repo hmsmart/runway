@@ -8,24 +8,11 @@ package templates
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-func initPlaidLink(token string) templ.ComponentScript {
-	return templ.ComponentScript{
-		Name: `__templ_initPlaidLink_ee78`,
-		Function: `function __templ_initPlaidLink_ee78(token){const btn = document.getElementById('link-button');
-    const handler = Plaid.create({
-        token: token,
-        onSuccess: async (publicToken, metadata) => {
-            // ...
-        }
-    });
-    btn.addEventListener('click', () => handler.open());
-}`,
-		Call:       templ.SafeScript(`__templ_initPlaidLink_ee78`, token),
-		CallInline: templ.SafeScriptInline(`__templ_initPlaidLink_ee78`, token),
-	}
-}
-
-func LinkPage(linkToken string, name string) templ.Component {
+// ConfirmPage is the interstitial a magic link lands on. The GET that renders
+// it leaves the token intact; only the POST consumes it. That way link
+// previewers and Telegram's in-app browser can fetch the URL without burning
+// the token before the user's real browser arrives.
+func ConfirmPage(action string, token string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -58,34 +45,39 @@ func LinkPage(linkToken string, name string) templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<article><h1>welcome to runway, ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<hgroup><h1>continue to runway</h1></hgroup><article><form method=\"post\" action=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var3 string
-			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(name)
+			var templ_7745c5c3_Var3 templ.SafeURL
+			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinURLErrs(templ.URL(action))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/link.templ`, Line: 17, Col: 31}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/confirm.templ`, Line: 13, Col: 58}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</h1><h3 class=\"pico-color-amber-200\">before you begin</h3><p>runway uses <a href=\"https://plaid.com\" target=\"_blank\"><span class=\"sc\">plaid</span></a> to securely connect to your bank. <span class=\"sc\">plaid</span> is used by thousands of apps to link financial accounts. runway never sees or stores your bank credentials. <span class=\"sc\">plaid</span> handles that entirely on their end.</p><p>once connected, runway syncs your transactions so it can track your daily spending and help you stay on top of your money. that's it. no selling your data, no ads, no weird stuff.</p><p>use of your financial data is governed by our <a href=\"/privacy\">privacy policy</a>.</p><button id=\"link-button\">connect your bank</button><p id=\"status\"></p><script src=\"https://cdn.plaid.com/link/v2/stable/link-initialize.js\"></script>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"><input type=\"hidden\" name=\"token\" value=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = initPlaidLink(linkToken).Render(ctx, templ_7745c5c3_Buffer)
+			var templ_7745c5c3_Var4 string
+			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.ResolveAttributeValue(token)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/confirm.templ`, Line: 14, Col: 63}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var4)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</article>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\"> <button type=\"submit\">continue</button></form></article>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			return nil
 		})
-		templ_7745c5c3_Err = Layout("Link Account").Render(templ.WithChildren(ctx, templ_7745c5c3_Var2), templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = Layout("sign in").Render(templ.WithChildren(ctx, templ_7745c5c3_Var2), templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

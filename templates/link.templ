@@ -13,6 +13,7 @@ script initPlaidLink(token string) {
 
 templ LinkPage(linkToken string, name string) {
     @Layout("Link Account") {
+		<article>
 		<h1>welcome to runway, { name }</h1>
 		<h3 class="pico-color-amber-200">before you begin</h3>
 		<p>
@@ -31,5 +32,6 @@ templ LinkPage(linkToken string, name string) {
 			<p id="status"></p>
 			<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 			@initPlaidLink(linkToken)
+		</article>
     }
 }

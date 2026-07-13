@@ -19,11 +19,17 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// SessionTTL is how long a web session minted from a Telegram magic link
+// stays valid. Sessions live only in memory, so a restart logs everyone out.
+const SessionTTL = 24 * time.Hour
+
 type Store struct {
 	*sqlcgen.Queries
 	db         *sql.DB
 	TGTokens   *ttlcache.Cache[string, domains.User]
 	LinkTokens *ttlcache.Cache[string, domains.User]
+	TGPhotos   *ttlcache.Cache[string, domains.Photo]
+	Sessions   *ttlcache.Cache[string, domains.User]
 }
 
 func newDatabase(ctx context.Context, dbPath string) (*sql.DB,
@@ -63,13 +69,19 @@ func GetStore(ctx context.Context, dbPath string, tokenTTL time.Duration) (*Stor
 	}
 	TGTokens := ttlcache.New(ttlcache.WithTTL[string, domains.User](tokenTTL))
 	LinkTokens := ttlcache.New(ttlcache.WithTTL[string, domains.User](tokenTTL))
+	TGPhotos := ttlcache.New(ttlcache.WithTTL[string, domains.Photo](24 * time.Hour))
+	Sessions := ttlcache.New(ttlcache.WithTTL[string, domains.User](SessionTTL))
 	go TGTokens.Start()
 	go LinkTokens.Start()
+	go TGPhotos.Start()
+	go Sessions.Start()
 	return &Store{
 		Queries:    sqlcgen.New(db),
 		db:         db,
 		TGTokens:   TGTokens,
+		TGPhotos:   TGPhotos,
 		LinkTokens: LinkTokens,
+		Sessions:   Sessions,
 	}, nil
 }
 
