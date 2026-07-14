@@ -8,11 +8,15 @@ templ DashboardPage(name string) {
             <h1>welcome back, { strings.ToLower(name) }</h1>
             <p>your runway at a glance</p>
         </hgroup>
-        <article>
-            <p>
-                the dashboard is still under construction - for now, your daily
-                report and account tools live in the <span class="sc">telegram</span> chat.
-            </p>
-        </article>
+        // Charts are standalone SVG documents; <object> (not <img>) lets each
+        // one load the site stylesheet, so they follow the theme and its
+        // light/dark scheme. See the chart-theme block in style.css.
+        <div class="charts">
+            <div class="wide"><object type="image/svg+xml" data="/charts/heatmap" class="heatmap">heatmap</object></div>
+            <div class="square"><object type="image/svg+xml" data="/charts/category/donut">donut</object></div>
+            <div class="wide"><object type="image/svg+xml" data="/charts/trend">trend</object></div>
+            <div class="square"><object type="image/svg+xml" data="/charts/category/bars">category bars</object></div>
+            <div class="square"><object type="image/svg+xml" data="/charts/category/radar">radar</object></div>
+        </div>
     }
 }

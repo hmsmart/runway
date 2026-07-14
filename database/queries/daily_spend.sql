@@ -6,7 +6,7 @@
 -- accounts and would swamp the spend signal. Untracked accounts are excluded
 -- so the tracked toggle means something once it gets a UI. (ASCII only: sqlc
 -- miscounts multibyte chars in comments and truncates the generated query.)
-SELECT CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date, t.amount, t.amort_end
+SELECT CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date, t.amount, t.amort_end, t.category_primary
 FROM transactions t
 JOIN accounts a ON a.account_id = t.account_id
 JOIN items i ON i.item_id = a.item_id
@@ -15,6 +15,11 @@ WHERE i.user_id = ?
   AND t.removed_at IS NULL
   AND t.amount > 0
   AND a.tracked = 1;
+
+-- name: ListDailySpendByUserSince :many
+SELECT * FROM daily_spend
+WHERE user_id = ? AND date >= ?
+ORDER BY date ASC;
 
 -- name: GetDailySpendDay :one
 SELECT * FROM daily_spend WHERE user_id = ? AND date = ?;

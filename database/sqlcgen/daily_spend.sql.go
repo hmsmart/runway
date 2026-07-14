@@ -67,8 +67,49 @@ func (q *Queries) InsertDailySpend(ctx context.Context, arg InsertDailySpendPara
 	return err
 }
 
+const listDailySpendByUserSince = `-- name: ListDailySpendByUserSince :many
+SELECT date, user_id, spend, ema_14, ema_28, ema_84 FROM daily_spend
+WHERE user_id = ? AND date >= ?
+ORDER BY date ASC
+`
+
+type ListDailySpendByUserSinceParams struct {
+	UserID string `json:"user_id"`
+	Date   string `json:"date"`
+}
+
+func (q *Queries) ListDailySpendByUserSince(ctx context.Context, arg ListDailySpendByUserSinceParams) ([]DailySpend, error) {
+	rows, err := q.db.QueryContext(ctx, listDailySpendByUserSince, arg.UserID, arg.Date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DailySpend{}
+	for rows.Next() {
+		var i DailySpend
+		if err := rows.Scan(
+			&i.Date,
+			&i.UserID,
+			&i.Spend,
+			&i.Ema14,
+			&i.Ema28,
+			&i.Ema84,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSpendTransactionsByUser = `-- name: ListSpendTransactionsByUser :many
-SELECT CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date, t.amount, t.amort_end
+SELECT CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date, t.amount, t.amort_end, t.category_primary
 FROM transactions t
 JOIN accounts a ON a.account_id = t.account_id
 JOIN items i ON i.item_id = a.item_id
@@ -80,9 +121,10 @@ WHERE i.user_id = ?
 `
 
 type ListSpendTransactionsByUserRow struct {
-	Date     string  `json:"date"`
-	Amount   float64 `json:"amount"`
-	AmortEnd *string `json:"amort_end"`
+	Date            string  `json:"date"`
+	Amount          float64 `json:"amount"`
+	AmortEnd        *string `json:"amort_end"`
+	CategoryPrimary string  `json:"category_primary"`
 }
 
 // The raw material for the daily-spend series: every transaction that counts
@@ -101,7 +143,12 @@ func (q *Queries) ListSpendTransactionsByUser(ctx context.Context, userID string
 	items := []ListSpendTransactionsByUserRow{}
 	for rows.Next() {
 		var i ListSpendTransactionsByUserRow
-		if err := rows.Scan(&i.Date, &i.Amount, &i.AmortEnd); err != nil {
+		if err := rows.Scan(
+			&i.Date,
+			&i.Amount,
+			&i.AmortEnd,
+			&i.CategoryPrimary,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

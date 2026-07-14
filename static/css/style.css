@@ -23,3 +23,113 @@ profile-pic img {
   object-fit: cover;
   border-radius: 50%;
 }
+
+/* ---------------------------------------------------------------------------
+ * Chart theme
+ *
+ * The /charts/* SVGs @import this stylesheet and read every color from the
+ * custom properties below — this block is the ONE place to re-plumb chart
+ * colors. Selectors use :root, :host so the same values apply whether the
+ * sheet is loaded by an HTML page or by a standalone SVG document.
+ *
+ * Series contracts:
+ *   --chart-ema14/28/84  the smoothed-rate colors, identical in every chart
+ *                        (trend lines, category bars, radar polygons, donut
+ *                        view pills). Ordinal blue ramp: deeper = longer
+ *                        horizon. Validated for CVD + contrast, light & dark.
+ *   --cat-<slug>         one stable color per Plaid primary category, shared
+ *                        by every chart that colors categories.
+ *   --chart-heat-0..4    the heatmap's sequential ramp (0 = no spend).
+ * ------------------------------------------------------------------------- */
+:root, :host {
+    --chart-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --chart-ink: #33383f;
+    --chart-muted: #6a7280;
+    --chart-grid: #e3e6ea;
+    --chart-axis: #c6ccd4;
+    --chart-bar: #cdd3da;      /* daily-spend bars: neutral, recessive */
+
+    --chart-ema14: #6da7ec;
+    --chart-ema28: #256abf;
+    --chart-ema84: #0d366b;
+
+    --chart-heat-0: #e9ecef;
+    --chart-heat-1: #cde2fb;
+    --chart-heat-2: #9ec5f4;
+    --chart-heat-3: #5598e7;
+    --chart-heat-4: #256abf;
+
+    --cat-food-and-drink: #1baf7a;
+    --cat-general-merchandise: #eda100;
+    --cat-transportation: #008300;
+    --cat-rent-and-utilities: #4a3aa7;
+    --cat-entertainment: #e34948;
+    --cat-travel: #e87ba4;
+    --cat-personal-care: #eb6834;
+    --cat-general-services: #0e7a52;
+    --cat-medical: #a52727;
+    --cat-home-improvement: #b57b00;
+    --cat-loan-payments: #7f71d1;
+    --cat-bank-fees: #005c00;
+    --cat-government-and-non-profit: #c25579;
+    --cat-transfer-out: #bf4a1a;
+    --cat-income: #557799;
+    --cat-transfer-in: #778899;
+    --cat-other: #8f96a3;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root, :host {
+        --chart-ink: #d0d5dc;
+        --chart-muted: #8891a0;
+        --chart-grid: #2c313a;
+        --chart-axis: #3b424d;
+        --chart-bar: #39404a;
+
+        --chart-ema14: #9ec5f4;
+        --chart-ema28: #3987e5;
+        --chart-ema84: #184f95;
+
+        --chart-heat-0: #232a33;
+        --chart-heat-1: #184f95;
+        --chart-heat-2: #256abf;
+        --chart-heat-3: #5598e7;
+        --chart-heat-4: #b7d3f6;
+
+        --cat-food-and-drink: #199e70;
+        --cat-general-merchandise: #c98500;
+        --cat-transportation: #299929;
+        --cat-rent-and-utilities: #9085e9;
+        --cat-entertainment: #e66767;
+        --cat-travel: #d55181;
+        --cat-personal-care: #d95926;
+        --cat-general-services: #35b98a;
+        --cat-medical: #d05252;
+        --cat-home-improvement: #daa520;
+        --cat-loan-payments: #a89ef0;
+        --cat-bank-fees: #4f9d4f;
+        --cat-government-and-non-profit: #d8749a;
+        --cat-transfer-out: #e07040;
+        --cat-income: #7799bb;
+        --cat-transfer-in: #99aabb;
+        --cat-other: #6c7683;
+    }
+}
+
+/* Dashboard chart grid: wide charts take a col-8, squares a col-4. */
+.charts {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+.charts .wide { grid-column: span 8; }
+.charts .square { grid-column: span 4; }
+.charts object { display: block; width: 100%; }
+.charts .wide object { aspect-ratio: 800 / 300; }
+.charts .wide object.heatmap { aspect-ratio: 800 / 264; }
+.charts .square object { aspect-ratio: 1; }
+@media (max-width: 992px) {
+    .charts .wide, .charts .square { grid-column: span 12; }
+    .charts .square { max-width: 480px; margin-inline: auto; width: 100%; }
+}

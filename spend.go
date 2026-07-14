@@ -24,6 +24,26 @@ const (
 	alpha84 = 2.0 / 85.0
 )
 
+// emaState folds a daily spend sequence into the three smoothed rates. The
+// first observed day seeds all three EMAs directly; every day after that
+// decays them. One definition serves both the stored daily_spend series and
+// the per-category chart series, so the two can never drift apart.
+type emaState struct {
+	e14, e28, e84 float64
+	seeded        bool
+}
+
+func (s *emaState) step(spend float64) {
+	if !s.seeded {
+		s.e14, s.e28, s.e84 = spend, spend, spend
+		s.seeded = true
+		return
+	}
+	s.e14 = alpha14*spend + (1-alpha14)*s.e14
+	s.e28 = alpha28*spend + (1-alpha28)*s.e28
+	s.e84 = alpha84*spend + (1-alpha84)*s.e84
+}
+
 // recomputeDailySpend rebuilds a user's entire daily_spend series from the
 // transactions table. A full rebuild (rather than incremental updates) is
 // deliberate: Plaid modifies and removes past transactions, and Spread and
@@ -55,26 +75,19 @@ func recomputeDailySpend(ctx context.Context, store *database.Store, userID stri
 		}
 		// Every day in the range gets a row, including zero-spend days —
 		// the EMAs must decay through quiet stretches.
-		var ema14, ema28, ema84 float64
-		seeded := false
+		var ema emaState
 		for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 			ds := d.Format(time.DateOnly)
 			spend := daily[ds]
-			if seeded {
-				ema14 = alpha14*spend + (1-alpha14)*ema14
-				ema28 = alpha28*spend + (1-alpha28)*ema28
-				ema84 = alpha84*spend + (1-alpha84)*ema84
-			} else {
-				ema14, ema28, ema84 = spend, spend, spend
-				seeded = true
-			}
+			ema.step(spend)
+			e14, e28, e84 := ema.e14, ema.e28, ema.e84
 			err := q.InsertDailySpend(ctx, sqlcgen.InsertDailySpendParams{
 				Date:   ds,
 				UserID: userID,
 				Spend:  spend,
-				Ema14:  &ema14,
-				Ema28:  &ema28,
-				Ema84:  &ema84,
+				Ema14:  &e14,
+				Ema28:  &e28,
+				Ema84:  &e84,
 			})
 			if err != nil {
 				return fmt.Errorf("insert daily spend %s: %w", ds, err)

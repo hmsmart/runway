@@ -56,7 +56,7 @@ func DashboardPage(name string) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</h1><p>your runway at a glance</p></hgroup><article><p>the dashboard is still under construction - for now, your daily report and account tools live in the <span class=\"sc\">telegram</span> chat.</p></article>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</h1><p>your runway at a glance</p></hgroup>   <div class=\"charts\"><div class=\"wide\"><object type=\"image/svg+xml\" data=\"/charts/heatmap\" class=\"heatmap\">heatmap</object></div><div class=\"square\"><object type=\"image/svg+xml\" data=\"/charts/category/donut\">donut</object></div><div class=\"wide\"><object type=\"image/svg+xml\" data=\"/charts/trend\">trend</object></div><div class=\"square\"><object type=\"image/svg+xml\" data=\"/charts/category/bars\">category bars</object></div><div class=\"square\"><object type=\"image/svg+xml\" data=\"/charts/category/radar\">radar</object></div></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
