@@ -1,136 +1,164 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
-
-	openrouter "github.com/OpenRouterTeam/go-sdk"
-	"github.com/OpenRouterTeam/go-sdk/models/components"
-	"github.com/OpenRouterTeam/go-sdk/optionalnullable"
+	"time"
 )
 
-// processReceiptImage sends the receipt photo plus the user's caption to the
-// vision model and returns the model's reply, which the system prompt
-// constrains to a bare JSON object. Every response shape the SDK can produce
-// is funnelled to either that JSON string or an error — never a partial
-// result.
-func processReceiptImage(ctx context.Context, imgBytes []byte, imgDescr string, cfg *Config) (string, error) {
-	s := openrouter.New(
-		openrouter.WithSecurity(cfg.OpenAPIKey),
-	)
-	imgB64 := base64.StdEncoding.EncodeToString(imgBytes)
-	mime := http.DetectContentType(imgBytes)
-	dataURL := fmt.Sprintf("data:%s;base64,%s", mime, imgB64)
+// OpenRouter's chat completions endpoint is OpenAI-compatible; these are
+// hand-written request/response types carrying only the fields we use, in
+// place of the generated SDK's exhaustive union types.
+const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-	res, err := s.Chat.Send(ctx, components.ChatRequest{
-		Model: openrouter.Pointer(cfg.VisionModel),
-		Messages: []components.ChatMessages{
-			components.CreateChatMessagesSystem(components.ChatSystemMessage{
-				Content: components.CreateChatSystemMessageContentStr(systemPrompt),
-			}),
-			components.CreateChatMessagesUser(components.ChatUserMessage{
-				Role: components.ChatUserMessageRoleUser,
-				Content: components.CreateChatUserMessageContentArrayOfChatContentItems(
-					[]components.ChatContentItems{
-						components.CreateChatContentItemsText(components.ChatContentText{
-							Type: components.ChatContentTextTypeText,
-							Text: fmt.Sprintf("Additional Context For Image: %s", imgDescr),
-						}),
-						components.CreateChatContentItemsImageURL(components.ChatContentImage{
-							Type: components.ChatContentImageTypeImageURL,
-							ImageURL: components.ChatContentImageImageURL{
-								Detail: components.ChatContentImageDetailHigh.ToPointer(),
-								URL:    dataURL,
-							},
-						}),
-					},
-				),
-			}),
+// receiptModelTimeout bounds one vision-model call. Receipts run through a
+// synchronous handler, so a hung provider must fail the command, not wedge it.
+const receiptModelTimeout = 60 * time.Second
+
+type orRequest struct {
+	Model    string      `json:"model"`
+	Messages []orMessage `json:"messages"`
+	// No omitempty: temperature 0 is a deliberate value, not an unset field.
+	Temperature    float64           `json:"temperature"`
+	MaxTokens      int               `json:"max_tokens"`
+	ResponseFormat *orResponseFormat `json:"response_format,omitempty"`
+}
+
+type orResponseFormat struct {
+	Type string `json:"type"`
+}
+
+type orMessage struct {
+	Role string `json:"role"`
+	// string for the system message, []orContentPart for the multimodal
+	// user message.
+	Content any `json:"content"`
+}
+
+type orContentPart struct {
+	Type     string      `json:"type"` // "text" or "image_url"
+	Text     string      `json:"text,omitempty"`
+	ImageURL *orImageURL `json:"image_url,omitempty"`
+}
+
+type orImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type orResponse struct {
+	Choices []orChoice `json:"choices"`
+	// OpenRouter reports some failures (moderation, provider errors) in a
+	// 200 body rather than an HTTP status.
+	Error *orError `json:"error"`
+}
+
+type orError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type orChoice struct {
+	FinishReason string `json:"finish_reason"`
+	Message      struct {
+		Content string  `json:"content"`
+		Refusal *string `json:"refusal"`
+	} `json:"message"`
+}
+
+// processReceiptImage sends the receipt photo plus the user's caption to the
+// vision model and returns the model's reply, which the system prompt and
+// json_object response format constrain to a bare JSON object. Every failure
+// mode ends in an error — never a partial result.
+func processReceiptImage(ctx context.Context, imgBytes []byte, imgDescr string, cfg *Config) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, receiptModelTimeout)
+	defer cancel()
+
+	mime := http.DetectContentType(imgBytes)
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(imgBytes))
+	body, err := json.Marshal(orRequest{
+		Model: cfg.VisionModel,
+		Messages: []orMessage{
+			{Role: "system", Content: receiptParserPrompt},
+			{Role: "user", Content: []orContentPart{
+				{Type: "text", Text: "Additional Context For Image: " + imgDescr},
+				{Type: "image_url", ImageURL: &orImageURL{URL: dataURL, Detail: "high"}},
+			}},
 		},
-		Temperature: optionalnullable.From(openrouter.Pointer(0.0)),
+		Temperature: 0,
 		// The reply is a small fixed-shape JSON object (~120 tokens worst
-		// case); the cap stops a misbehaving model from rambling on our dime.
-		// Overruns surface as finish_reason=length and are rejected above.
-		MaxTokens: optionalnullable.From(openrouter.Pointer(int64(300))),
-	}, nil)
+		// case); the cap stops a misbehaving model from rambling on our
+		// dime. Overruns surface as finish_reason=length below.
+		MaxTokens:      300,
+		ResponseFormat: &orResponseFormat{Type: "json_object"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal chat request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openRouterURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build chat request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.OpenAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("openrouter chat send: %w", err)
 	}
-	if res == nil || res.ChatResult == nil {
-		return "", errors.New("openrouter returned no chat result")
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read chat response: %w", err)
 	}
-	if len(res.ChatResult.Choices) == 0 {
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("openrouter status %s: %s", resp.Status, errSnippet(respBody))
+	}
+
+	var out orResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return "", fmt.Errorf("decode chat response: %w", err)
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("openrouter error %d: %s", out.Error.Code, out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
 		return "", errors.New("openrouter returned no choices")
 	}
-	choice := res.ChatResult.Choices[0]
+	choice := out.Choices[0]
 	// Truncated output means unparseable JSON; fail here rather than letting
 	// json.Unmarshal surface a confusing syntax error downstream.
-	if choice.FinishReason != nil && *choice.FinishReason == components.ChatFinishReasonEnumLength {
+	if choice.FinishReason == "length" {
 		return "", errors.New("model output truncated (finish_reason=length)")
 	}
-	text, err := assistantText(choice.Message)
-	if err != nil {
-		if choice.FinishReason != nil {
-			return "", fmt.Errorf("%w (finish_reason=%s)", err, *choice.FinishReason)
-		}
-		return "", err
+	if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
+		return "", fmt.Errorf("model refused: %s", *choice.Message.Refusal)
 	}
-	return stripJSONFences(text), nil
+	if choice.Message.Content == "" {
+		return "", fmt.Errorf("assistant message has no content (finish_reason=%s)", choice.FinishReason)
+	}
+	return stripJSONFences(choice.Message.Content), nil
 }
 
-// assistantText flattens the assistant message's content union to plain text.
-// A set refusal wins over content: it means the model declined the request.
-func assistantText(msg components.ChatAssistantMessage) (string, error) {
-	if refusal, ok := msg.Refusal.Get(); ok && refusal != nil && *refusal != "" {
-		return "", fmt.Errorf("model refused: %s", *refusal)
+// errSnippet trims an error response body for inclusion in an error message.
+func errSnippet(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > 300 {
+		s = s[:300] + "…"
 	}
-	content, ok := msg.Content.Get()
-	if !ok || content == nil {
-		return "", errors.New("assistant message has no content")
-	}
-	switch content.Type {
-	case components.ChatAssistantMessageContentTypeStr:
-		if content.Str == nil {
-			return "", errors.New("assistant content marked string but is nil")
-		}
-		return *content.Str, nil
-	case components.ChatAssistantMessageContentTypeArrayOfChatContentItems:
-		// Multimodal replies arrive as parts; the concatenated text parts
-		// are the message. Non-text parts (images, audio) carry nothing
-		// useful for us.
-		var b strings.Builder
-		for _, item := range content.ArrayOfChatContentItems {
-			if item.ChatContentText != nil {
-				b.WriteString(item.ChatContentText.Text)
-			}
-		}
-		if b.Len() == 0 {
-			return "", errors.New("assistant content items contain no text")
-		}
-		return b.String(), nil
-	case components.ChatAssistantMessageContentTypeAny:
-		// The SDK's catch-all variant. A string passes through; anything
-		// else is re-marshalled so the caller still gets JSON to parse.
-		if s, ok := content.Any.(string); ok {
-			return s, nil
-		}
-		raw, err := json.Marshal(content.Any)
-		if err != nil {
-			return "", fmt.Errorf("re-marshal untyped assistant content: %w", err)
-		}
-		return string(raw), nil
-	default:
-		return "", fmt.Errorf("unhandled assistant content type %q", content.Type)
-	}
+	return s
 }
 
 // stripJSONFences unwraps a markdown code fence ("```json\n{...}\n```") if
-// the model added one despite the prompt telling it not to.
+// the model added one despite json_object mode and the prompt.
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
 	if after, ok := strings.CutPrefix(s, "```json"); ok {
@@ -144,7 +172,7 @@ func stripJSONFences(s string) string {
 	return strings.TrimSpace(s)
 }
 
-const systemPrompt = `
+const receiptParserPrompt = `
 You are a receipt parser for a personal finance bot. Extract transaction details from the receipt image and any user-provided context.
 Respond with ONLY a JSON object, no markdown fences, no commentary.
 The user may provide additional context about the transaction in the user prompt
