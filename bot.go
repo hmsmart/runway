@@ -228,6 +228,13 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/dash", bot.MatchTypeExact,
 		chain(t.handleDash, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/cash", bot.MatchTypePrefix,
+		chain(t.handleCash, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	// /receipt is a discoverability stub: photos book themselves (see the
+	// MatchFunc above — photo messages carry a Caption, not Text, so the two
+	// never collide), and this just tells the user that.
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/receipt", bot.MatchTypePrefix,
+		chain(t.handleReceiptHelp, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/accounts", bot.MatchTypeExact,
 		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	// Exact must be registered before Prefix: handlers are tried in order and
@@ -314,6 +321,8 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"<code>/runway</code> — yesterday's spend, your daily rates, and days of cash left\n" +
 			"<code>/report [TIME]</code> — get the runway report every day at TIME (e.g. <code>/report 8:00</code>); <code>/report off</code> stops it\n" +
 			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
+			"<code>/cash AMOUNT NOTE</code> — jot down a cash transaction (e.g. <code>/cash 5.50 taco truck</code>)\n" +
+			"📸 or just send a photo of a receipt and I'll book it as a transaction\n" +
 			"<code>/dash</code> — sign in to your web dashboard\n" +
 			"<code>/link</code> — connect a bank account\n" +
 			"<code>/accounts</code> — list your linked accounts and balances\n" +
@@ -344,6 +353,70 @@ func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models
 		pong = "Unpongthenticated"
 	}
 	t.sendText(ctx, b, update.Message.Chat.ID, pong)
+}
+
+// handleReceiptHelp explains the receipt-photo capability. The command
+// exists so the feature shows in the menu; the actual trigger is simply
+// sending a photo.
+func (t *TelegramBot) handleReceiptHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
+	t.sendText(ctx, b, update.Message.Chat.ID,
+		"📸 Just send me a photo of a receipt — no command needed — and I'll book it as a transaction. "+
+			"Add a caption if anything needs clarifying (the total, the store, the date).\n\n"+
+			"For quick text-only entries, use <code>/cash</code>, e.g. <code>/cash 5.50 taco truck</code>.")
+}
+
+// handleCash books a quick text note ("/cash 5.50 taco truck") as a manual
+// transaction. Same reaction protocol as handleReceipt: 👨‍💻 while the model
+// works, 👍 once booked, 👎 plus a reply on failure.
+func (t *TelegramBot) handleCash(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	msgID := update.Message.ID
+	slog.Info("parsing cash transaction for user", "chatID", chatID)
+	fail := func(text string) {
+		t.react(ctx, chatID, msgID, "👎")
+		t.replyText(ctx, b, chatID, msgID, text)
+	}
+	userContext := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/cash"))
+	if userContext == "" {
+		fail("Jot the transaction after the command, e.g. <code>/cash 5.50 taco truck</code>. Amounts, store names, and dates all help.")
+		return
+	}
+	t.react(ctx, chatID, msgID, "👨‍💻")
+	receiptJSON, err := processReceiptNote(ctx, userContext, t.cfg)
+	if err != nil {
+		slog.Error("failed to process receipt note", "chatID", chatID, "err", err)
+		fail("failed to process that note, please try again later")
+		return
+	}
+	rt, err := parseReceiptTransaction(receiptJSON)
+	if err != nil {
+		slog.Error("model returned unusable receipt json", "chatID", chatID, "json", receiptJSON, "err", err)
+		fail(receiptParseErrorText(err, "Try adding more detail (e.g. the total and store name)."))
+		return
+	}
+	txID, err := createManualTransaction(ctx, t.store, t.cfg, user.ID(), rt, receiptJSON)
+	if err != nil {
+		slog.Error("failed to create manual transaction", "chatID", chatID, "err", err)
+		fail(errTryLater)
+		return
+	}
+	slog.Info("created manual transaction", "chatID", chatID, "tx", txID, "amt", rt.Amount, "date", rt.Date)
+	t.react(ctx, chatID, msgID, "👍")
+	t.recomputeSpend(ctx)
+	// The row landed at notified = 0; the drain worker announces it with the
+	// usual Spread/Exclude buttons.
+	t.startDrain(chatID)
+}
+
+// receiptParseErrorText maps a parseReceiptTransaction error to user-facing
+// copy: a too-old date is the user's to fix (and gets an explanation),
+// anything else gets the generic retry line plus the caller's hint.
+func receiptParseErrorText(err error, hint string) string {
+	if errors.Is(err, errReceiptTooOld) {
+		return fmt.Sprintf("That transaction is dated more than %d days back — older than what I track, so I can't book it.", notifyWindowDays)
+	}
+	return "I couldn't make sense of that receipt. " + hint
 }
 
 // react sets (or replaces) the bot's emoji reaction on a message. The emoji
@@ -389,6 +462,7 @@ func (t *TelegramBot) handleReceipt(ctx context.Context, b *bot.Bot, update *mod
 	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
 	msgID := update.Message.ID
+	t.react(ctx, chatID, msgID, "👨‍💻")
 	userInput := strings.TrimSpace(update.Message.Caption)
 	// fail marks the photo 👎 and explains in a reply pinned to it.
 	fail := func(text string) {
@@ -422,8 +496,6 @@ func (t *TelegramBot) handleReceipt(ctx context.Context, b *bot.Bot, update *mod
 		fail("failed to process attachment, please try again later")
 		return
 	}
-	// Accepted: the photo is in hand and the model call is next.
-	t.react(ctx, chatID, msgID, "👨‍💻")
 	receiptJSON, err := processReceiptImage(ctx, data, userInput, t.cfg)
 	if err != nil {
 		slog.Error("failed to process receipt image", "chatID", chatID, "err", err)
@@ -433,7 +505,7 @@ func (t *TelegramBot) handleReceipt(ctx context.Context, b *bot.Bot, update *mod
 	rt, err := parseReceiptTransaction(receiptJSON)
 	if err != nil {
 		slog.Error("model returned unusable receipt json", "chatID", chatID, "json", receiptJSON, "err", err)
-		fail("I couldn't make sense of that receipt. Try a clearer photo, or add context in the caption (e.g. the total and store name).")
+		fail(receiptParseErrorText(err, "Try a clearer photo, or add context in the caption (e.g. the total and store name)."))
 		return
 	}
 	txID, err := createManualTransaction(ctx, t.store, t.cfg, user.ID(), rt, receiptJSON)
@@ -845,7 +917,8 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 			cmds = append(cmds,
 				models.BotCommand{Command: "runway", Description: "Yesterday's spend and days of cash left"},
 				models.BotCommand{Command: "report", Description: "Schedule a daily runway report"},
-				models.BotCommand{Command: "receipt", Description: "Add a custom transaction via receipt image or text"},
+				models.BotCommand{Command: "receipt", Description: "Send a photo of a receipt to book a transaction"},
+				models.BotCommand{Command: "cash", Description: "Jot down a transaction, e.g. /cash 5.50 taco truck"},
 				models.BotCommand{Command: "dash", Description: "Sign in to your web dashboard"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},

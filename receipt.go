@@ -20,9 +20,16 @@ import (
 type receiptTransaction struct {
 	Merchant         string  `json:"merchant"`
 	Amount           float64 `json:"amount"`
+	Date             string  `json:"date"`
 	CategoryPrimary  string  `json:"primary_category"`
 	CategoryDetailed string  `json:"detailed_category"`
 }
+
+// errReceiptTooOld flags a transaction dated beyond the notify window. It
+// gets its own user-facing copy in the handlers: booking it anyway would
+// count the spend but the drain worker would retire the row unannounced —
+// no card, no Exclude button to fix a mistake with.
+var errReceiptTooOld = fmt.Errorf("receipt older than %d days", notifyWindowDays)
 
 // parseReceiptTransaction decodes and sanity-checks the model's JSON. The
 // model is prompted with an allowed-category list but is still a language
@@ -47,6 +54,23 @@ func parseReceiptTransaction(raw string) (receiptTransaction, error) {
 	}
 	if !strings.HasPrefix(rt.CategoryDetailed, rt.CategoryPrimary+"_") {
 		return receiptTransaction{}, fmt.Errorf("detailed category %q not under primary %q", rt.CategoryDetailed, rt.CategoryPrimary)
+	}
+	// YYYY-MM-DD compares lexically in date order, matching how the rest of
+	// the app treats date columns.
+	today := time.Now().Format(time.DateOnly)
+	if rt.Date == "" {
+		// The prompt says to default to the current day; enforce it here too.
+		rt.Date = today
+	} else {
+		if _, err := time.Parse(time.DateOnly, rt.Date); err != nil {
+			return receiptTransaction{}, fmt.Errorf("unparseable date %q: %w", rt.Date, err)
+		}
+		if rt.Date > today {
+			return receiptTransaction{}, fmt.Errorf("date %q is in the future", rt.Date)
+		}
+		if rt.Date < time.Now().AddDate(0, 0, -notifyWindowDays).Format(time.DateOnly) {
+			return receiptTransaction{}, errReceiptTooOld
+		}
 	}
 	return rt, nil
 }
@@ -124,7 +148,7 @@ func createManualTransaction(ctx context.Context, store *database.Store, cfg *Co
 		TxID:             txid.String(),
 		PlaidTxID:        plaidTxID,
 		AccountID:        accountID,
-		Date:             time.Now().Format(time.DateOnly),
+		Date:             rt.Date,
 		Amount:           rt.Amount,
 		Name:             rt.Merchant,
 		MerchantName:     &rt.Merchant,

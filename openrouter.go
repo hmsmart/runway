@@ -78,27 +78,75 @@ type orChoice struct {
 // json_object response format constrain to a bare JSON object. Every failure
 // mode ends in an error — never a partial result.
 func processReceiptImage(ctx context.Context, imgBytes []byte, imgDescr string, cfg *Config) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, receiptModelTimeout)
-	defer cancel()
-
 	mime := http.DetectContentType(imgBytes)
 	dataURL := fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(imgBytes))
-	body, err := json.Marshal(orRequest{
+	return receiptProcessRequest(ctx, receiptRequest(cfg, []orContentPart{
+		{Type: "text", Text: "Additional Context For Image: " + imgDescr},
+		{Type: "image_url", ImageURL: &orImageURL{URL: dataURL, Detail: "high"}},
+	}), cfg)
+}
+
+// processReceiptNote is the text-only sibling of processReceiptImage for
+// quick jots like "/cash 5.50 taco truck". The Transaction Notes label keeps
+// the user's freeform text clearly delimited as data, not instructions.
+func processReceiptNote(ctx context.Context, txNote string, cfg *Config) (string, error) {
+	return receiptProcessRequest(ctx, receiptRequest(cfg,
+		"The user has quickly jotted down a transaction. Extract the transaction details from their note.\nTransaction Notes: "+txNote,
+	), cfg)
+}
+
+// receiptRequest assembles the shared chat request around one user message:
+// a multimodal parts array for photos, a plain string for text notes. The
+// system prompt gets today's date (with weekday, so "last Friday" resolves)
+// stamped in per call.
+func receiptRequest(cfg *Config, userContent any) orRequest {
+	return orRequest{
 		Model: cfg.VisionModel,
 		Messages: []orMessage{
-			{Role: "system", Content: receiptParserPrompt},
-			{Role: "user", Content: []orContentPart{
-				{Type: "text", Text: "Additional Context For Image: " + imgDescr},
-				{Type: "image_url", ImageURL: &orImageURL{URL: dataURL, Detail: "high"}},
-			}},
+			{Role: "system", Content: fmt.Sprintf(receiptParserPrompt, time.Now().Format("Monday, January 02 2006"))},
+			{Role: "user", Content: userContent},
 		},
 		Temperature: 0,
-		// The reply is a small fixed-shape JSON object (~120 tokens worst
+		// The reply is a small fixed-shape JSON object (~130 tokens worst
 		// case); the cap stops a misbehaving model from rambling on our
 		// dime. Overruns surface as finish_reason=length below.
 		MaxTokens:      300,
 		ResponseFormat: &orResponseFormat{Type: "json_object"},
-	})
+	}
+}
+
+// errSnippet trims an error response body for inclusion in an error message.
+func errSnippet(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
+}
+
+// stripJSONFences unwraps a markdown code fence ("```json\n{...}\n```") if
+// the model added one despite json_object mode and the prompt.
+func stripJSONFences(s string) string {
+	s = strings.TrimSpace(s)
+	if after, ok := strings.CutPrefix(s, "```json"); ok {
+		s = after
+	} else if after, ok := strings.CutPrefix(s, "```"); ok {
+		s = after
+	} else {
+		return s
+	}
+	s = strings.TrimSuffix(strings.TrimSpace(s), "```")
+	return strings.TrimSpace(s)
+}
+
+// receiptProcessRequest executes one chat completion and funnels every
+// response shape to either the assistant's text or an error — never a
+// partial result.
+func receiptProcessRequest(ctx context.Context, request orRequest, cfg *Config) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, receiptModelTimeout)
+	defer cancel()
+
+	body, err := json.Marshal(request)
 	if err != nil {
 		return "", fmt.Errorf("marshal chat request: %w", err)
 	}
@@ -148,37 +196,18 @@ func processReceiptImage(ctx context.Context, imgBytes []byte, imgDescr string, 
 	return stripJSONFences(choice.Message.Content), nil
 }
 
-// errSnippet trims an error response body for inclusion in an error message.
-func errSnippet(body []byte) string {
-	s := strings.TrimSpace(string(body))
-	if len(s) > 300 {
-		s = s[:300] + "…"
-	}
-	return s
-}
-
-// stripJSONFences unwraps a markdown code fence ("```json\n{...}\n```") if
-// the model added one despite json_object mode and the prompt.
-func stripJSONFences(s string) string {
-	s = strings.TrimSpace(s)
-	if after, ok := strings.CutPrefix(s, "```json"); ok {
-		s = after
-	} else if after, ok := strings.CutPrefix(s, "```"); ok {
-		s = after
-	} else {
-		return s
-	}
-	s = strings.TrimSuffix(strings.TrimSpace(s), "```")
-	return strings.TrimSpace(s)
-}
-
+// receiptParserPrompt is a template: %s receives the current date (see
+// receiptRequest). Shared by the photo and text-note paths so the schema and
+// category list can never drift between them.
 const receiptParserPrompt = `
 You are a receipt parser for a personal finance bot. Extract transaction details from the receipt image and any user-provided context.
 Respond with ONLY a JSON object, no markdown fences, no commentary.
-The user may provide additional context about the transaction in the user prompt
+The current day is %s, use this information to handle ambiguous dates or relative dates.
+The user may provide additional context about the transaction in the user prompt.
 Use the receipt image as the primary source of truth. Use the user's context to fill gaps or confirm details. If no image is provided, use the user's context alone.
 ## JSON Schema
 {
+"date": "string - YYYY-MM-DD, the transaction date from the receipt or note; use the current day if no date is stated",
 "merchant": "string — store/business name",
 "amount": 0.00,
 "primary_category": "string — one of the allowed primary categories",

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,15 +12,31 @@ import (
 )
 
 func TestParseReceiptTransaction(t *testing.T) {
-	good := `{"merchant":"Costco Wholesale","amount":128.47,"primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_GROCERIES"}`
+	today := time.Now().Format(time.DateOnly)
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
+
+	good := `{"merchant":"Costco Wholesale","amount":128.47,"date":"` + yesterday + `","primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_GROCERIES"}`
 	rt, err := parseReceiptTransaction(good)
 	if err != nil {
 		t.Fatalf("valid json rejected: %v", err)
 	}
-	if rt.Merchant != "Costco Wholesale" || rt.Amount != 128.47 {
+	if rt.Merchant != "Costco Wholesale" || rt.Amount != 128.47 || rt.Date != yesterday {
 		t.Errorf("parsed fields wrong: %+v", rt)
 	}
 
+	// A missing date defaults to today rather than erroring: the prompt
+	// tells the model to use the current day, but the guarantee lives here.
+	noDate := `{"merchant":"X","amount":10,"primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_COFFEE"}`
+	rt, err = parseReceiptTransaction(noDate)
+	if err != nil {
+		t.Fatalf("dateless json rejected: %v", err)
+	}
+	if rt.Date != today {
+		t.Errorf("missing date = %q, want today %q", rt.Date, today)
+	}
+
+	tooOld := time.Now().AddDate(0, 0, -(notifyWindowDays + 1)).Format(time.DateOnly)
+	tomorrow := time.Now().AddDate(0, 0, 1).Format(time.DateOnly)
 	bad := map[string]string{
 		"not json":          `parsed: Costco $128`,
 		"no merchant":       `{"merchant":"  ","amount":10,"primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_COFFEE"}`,
@@ -28,11 +45,19 @@ func TestParseReceiptTransaction(t *testing.T) {
 		"absurd amount":     `{"merchant":"X","amount":2000000,"primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_COFFEE"}`,
 		"invented primary":  `{"merchant":"X","amount":10,"primary_category":"SNACKS","detailed_category":"SNACKS_CHIPS"}`,
 		"mismatched detail": `{"merchant":"X","amount":10,"primary_category":"FOOD_AND_DRINK","detailed_category":"TRAVEL_FLIGHTS"}`,
+		"garbage date":      `{"merchant":"X","amount":10,"date":"last tuesday","primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_COFFEE"}`,
+		"future date":       `{"merchant":"X","amount":10,"date":"` + tomorrow + `","primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_COFFEE"}`,
+		"too-old date":      `{"merchant":"X","amount":10,"date":"` + tooOld + `","primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_COFFEE"}`,
 	}
 	for name, raw := range bad {
 		if _, err := parseReceiptTransaction(raw); err == nil {
 			t.Errorf("%s: expected error, got none", name)
 		}
+	}
+
+	// The too-old case must be distinguishable so handlers can explain it.
+	if _, err := parseReceiptTransaction(bad["too-old date"]); !errors.Is(err, errReceiptTooOld) {
+		t.Errorf("too-old date error = %v, want errReceiptTooOld", err)
 	}
 }
 
@@ -58,7 +83,8 @@ func TestCreateManualTransaction(t *testing.T) {
 	cfg := &Config{DBCryptKey: make([]byte, 32)}
 	rand.Read(cfg.DBCryptKey)
 
-	raw := `{"merchant":"Costco Wholesale","amount":128.47,"primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_GROCERIES"}`
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
+	raw := `{"merchant":"Costco Wholesale","amount":128.47,"date":"` + yesterday + `","primary_category":"FOOD_AND_DRINK","detailed_category":"FOOD_AND_DRINK_GROCERIES"}`
 	rt, err := parseReceiptTransaction(raw)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -75,8 +101,8 @@ func TestCreateManualTransaction(t *testing.T) {
 	if tx.Amount != 128.47 || tx.Name != "Costco Wholesale" || tx.PaymentChannel != "manual" {
 		t.Errorf("row fields wrong: %+v", tx)
 	}
-	if tx.Date != time.Now().Format(time.DateOnly) {
-		t.Errorf("date = %s, want today", tx.Date)
+	if tx.Date != yesterday {
+		t.Errorf("date = %s, want the model-extracted date %s", tx.Date, yesterday)
 	}
 	if tx.Notified != 0 {
 		t.Errorf("notified = %d, want 0 so the drain worker announces it", tx.Notified)
