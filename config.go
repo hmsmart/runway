@@ -37,6 +37,10 @@ type Config struct {
 	PlaidHistoryDays int32         `envconfig:"PLAID_HISTORY_DAYS" default:"730"`
 	TokenTTL         time.Duration `envconfig:"TOKEN_TTL" default:"30m"`
 
+	//OpenRouter Config
+	OpenAPIKey  string `envconfig:"OPENAI_API_KEY"`
+	VisionModel string `envconfig:"VISION_MODEL" default:"qwen/qwen3-vl-8b-instruct"`
+
 	// Parsed from PlaidProducts / PlaidCountryCodes; used when creating link tokens.
 	PlaidProductList     []plaid.Products    `envconfig:"-"`
 	PlaidCountryCodeList []plaid.CountryCode `envconfig:"-"`

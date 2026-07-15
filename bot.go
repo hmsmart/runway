@@ -221,6 +221,9 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleRunway, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/report", bot.MatchTypePrefix,
 		chain(t.handleReport, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+		return update.Message != nil && update.Message.Photo != nil
+	}, chain(t.handleReceipt, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/link", bot.MatchTypeExact,
 		chain(t.handleLink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/dash", bot.MatchTypeExact,
@@ -343,6 +346,74 @@ func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models
 	t.sendText(ctx, b, update.Message.Chat.ID, pong)
 }
 
+func (t *TelegramBot) handleReceipt(ctx context.Context, b *bot.Bot, update *models.Update) {
+	slog.Info("entry")
+	user := domains.UserFromContext(ctx)
+	userInput := strings.TrimSpace(update.Message.Caption)
+	photo := update.Message.Photo
+	if len(photo) == 0 {
+		slog.Error("expected a photo but got any empty array", "chatID", user.TelegramID())
+		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		return
+	}
+	lgPhoto := photo[len(photo)-1]
+	fileID := lgPhoto.FileID
+	// Download the file
+	file, err := t.bot.GetFile(ctx, &bot.GetFileParams{
+		FileID: fileID,
+	})
+	if err != nil {
+		slog.Error("failed to get attachment file url", "chatID", user.TelegramID(), "err", err)
+		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		return
+	}
+	// 3. Download the actual bytes
+	resp, err := http.Get(t.bot.FileDownloadLink(file))
+	if err != nil {
+		slog.Error("failed to get attachment file url", "chatID", user.TelegramID(), "err", err)
+		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		return
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReceiptPhotoBytes+1))
+	if err != nil {
+		slog.Error("failed to get attachment file url", "chatID", user.TelegramID(), "err", err)
+		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		return
+	}
+	t.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   fmt.Sprintf("processing image (%s) <%dKiB>, an updated transaction will post soon", userInput, len(data)/1024),
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: update.Message.ID,
+		},
+	})
+	receiptJSON, err := processReceiptImage(ctx, data, userInput, t.cfg)
+	if err != nil {
+		slog.Error("failed to process receipt image", "chatID", user.TelegramID(), "err", err)
+		t.sendText(ctx, b, update.Message.Chat.ID, "failed to read that receipt, please try again later")
+		return
+	}
+	rt, err := parseReceiptTransaction(receiptJSON)
+	if err != nil {
+		slog.Error("model returned unusable receipt json", "chatID", user.TelegramID(), "json", receiptJSON, "err", err)
+		t.sendText(ctx, b, update.Message.Chat.ID,
+			"I couldn't make sense of that receipt. Try a clearer photo, or add context in the caption (e.g. the total and store name).")
+		return
+	}
+	txID, err := createManualTransaction(ctx, t.store, t.cfg, user.ID(), rt, receiptJSON)
+	if err != nil {
+		slog.Error("failed to create manual transaction", "chatID", user.TelegramID(), "err", err)
+		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
+		return
+	}
+	slog.Info("created manual transaction", "chatID", user.TelegramID(), "tx", txID, "amt", rt.Amount)
+	t.recomputeSpend(ctx)
+	// The row landed at notified = 0; the drain worker announces it with the
+	// usual Spread/Exclude buttons, fulfilling the "will post soon" promise.
+	t.startDrain(update.Message.Chat.ID)
+}
+
 func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update *models.Update) {
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) != 2 {
@@ -398,9 +469,9 @@ const budgetExplainer = "Think about what you spend in a typical month on things
 	"Leave out fixed bills like rent or mortgage, insurance, and utilities; Runway only tracks the spending you can actually control.\n\n" +
 	"When you have a number, send <code>/budget</code> followed by the amount (e.g. <code>/budget 1500</code>)."
 
-// parseBudget turns user input like "1500", "$1,500" or "1500.50" into a
+// parseDollarString turns user input like "1500", "$1,500" or "1500.50" into a
 // dollar amount, rejecting non-positive and absurd values.
-func parseBudget(s string) (float64, error) {
+func parseDollarString(s string) (float64, error) {
 	s = strings.TrimPrefix(s, "$")
 	s = strings.ReplaceAll(s, ",", "")
 	amt, err := strconv.ParseFloat(s, 64)
@@ -433,7 +504,7 @@ func (t *TelegramBot) handleBudget(ctx context.Context, b *bot.Bot, update *mode
 			"You haven't set a monthly discretionary budget yet.\n\n"+budgetExplainer)
 		return
 	}
-	amt, err := parseBudget(parts[1])
+	amt, err := parseDollarString(parts[1])
 	if len(parts) != 2 || err != nil {
 		slog.Info("invalid budget amount", "chatID", update.Message.Chat.ID, "message", update.Message.Text)
 		t.sendText(ctx, b, update.Message.Chat.ID,
@@ -541,6 +612,7 @@ func (t *TelegramBot) sendMagicLink(ctx context.Context, b *bot.Bot, chatID int6
 // size is 160px (a few KB), so the cap only guards against a misbehaving
 // response, not legitimate photos.
 const maxProfilePhotoBytes = 1 << 20
+const maxReceiptPhotoBytes = 20 << 20
 
 // fetchUserPhotoTimeout bounds the whole photo fetch (two API calls plus the
 // CDN download). The photo is cosmetic, so a slow fetch should degrade to the
@@ -737,6 +809,7 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 			cmds = append(cmds,
 				models.BotCommand{Command: "runway", Description: "Yesterday's spend and days of cash left"},
 				models.BotCommand{Command: "report", Description: "Schedule a daily runway report"},
+				models.BotCommand{Command: "receipt", Description: "Add a custom transaction via receipt image or text"},
 				models.BotCommand{Command: "dash", Description: "Sign in to your web dashboard"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},

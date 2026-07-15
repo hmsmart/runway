@@ -121,6 +121,29 @@ func (q *Queries) GetItemByID(ctx context.Context, itemID string) (Item, error) 
 	return i, err
 }
 
+const getManualItemByUser = `-- name: GetManualItemByUser :one
+SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at, user_id FROM items WHERE user_id = ? AND status = 'manual'
+`
+
+// The hidden container for user-entered (/receipt) transactions. status is
+// 'manual', which keeps it out of every status='active' query: the sync
+// loop, /accounts, /unlink, and the item count.
+func (q *Queries) GetManualItemByUser(ctx context.Context, userID string) (Item, error) {
+	row := q.db.QueryRowContext(ctx, getManualItemByUser, userID)
+	var i Item
+	err := row.Scan(
+		&i.ItemID,
+		&i.AccessToken,
+		&i.InstitutionName,
+		&i.Status,
+		&i.Cursor,
+		&i.CreatedAt,
+		&i.LastSyncedAt,
+		&i.UserID,
+	)
+	return i, err
+}
+
 const listItemsByUser = `-- name: ListItemsByUser :many
 SELECT item_id, access_token, institution_name, status, cursor, created_at, last_synced_at, user_id FROM items WHERE user_id = ? AND status = 'active' ORDER BY created_at ASC, item_id ASC
 `

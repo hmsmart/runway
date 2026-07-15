@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -220,6 +222,20 @@ func (t *TelegramBot) handleUnregisterCallback(ctx context.Context, b *bot.Bot, 
 			return
 		}
 	}
+	// The manual /receipt container is status='manual', so the active-item
+	// loop above never sees it; it has no Plaid side, so local deletion is
+	// the whole job. Left behind it would break DeleteUser's foreign key.
+	if _, err := t.store.GetManualItemByUser(ctx, user.ID()); err == nil {
+		if err := t.removeItemData(ctx, manualContainerID(user.ID())); err != nil {
+			slog.Error("failed to remove manual item during unregister", "user", user.ID(), "err", err)
+			t.answerCallback(ctx, b, update, "Something went wrong part-way — some accounts may remain. Run /unregister again later.")
+			return
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		slog.Error("failed to check manual item during unregister", "user", user.ID(), "err", err)
+		t.answerCallback(ctx, b, update, "Something went wrong — nothing was deleted. Try again later.")
+		return
+	}
 	if err := t.store.DeleteUser(ctx, user.ID()); err != nil {
 		slog.Error("failed to delete user", "chatID", user.TelegramID(), "err", err)
 		t.answerCallback(ctx, b, update, "Something went wrong — your accounts are unlinked but registration remains. Run /unregister again later.")
@@ -250,14 +266,20 @@ func (t *TelegramBot) removeItem(ctx context.Context, item sqlcgen.Item) error {
 	if _, _, err := t.plaid.PlaidApi.ItemRemove(callCtx).ItemRemoveRequest(*req).Execute(); err != nil {
 		return fmt.Errorf("plaid item remove: %w", err)
 	}
+	return t.removeItemData(ctx, item.ItemID)
+}
+
+// removeItemData deletes an item's local rows: transactions, accounts, then
+// the item itself.
+func (t *TelegramBot) removeItemData(ctx context.Context, itemID string) error {
 	return t.store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
-		if err := q.DeleteTransactionsByItem(ctx, item.ItemID); err != nil {
+		if err := q.DeleteTransactionsByItem(ctx, itemID); err != nil {
 			return fmt.Errorf("delete transactions: %w", err)
 		}
-		if err := q.DeleteAccountsByItem(ctx, item.ItemID); err != nil {
+		if err := q.DeleteAccountsByItem(ctx, itemID); err != nil {
 			return fmt.Errorf("delete accounts: %w", err)
 		}
-		if err := q.DeleteItem(ctx, item.ItemID); err != nil {
+		if err := q.DeleteItem(ctx, itemID); err != nil {
 			return fmt.Errorf("delete item: %w", err)
 		}
 		return nil

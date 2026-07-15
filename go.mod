@@ -3,6 +3,7 @@ module github.com/hmsmart/runway
 go 1.26.4
 
 require (
+	github.com/OpenRouterTeam/go-sdk v0.5.17
 	github.com/a-h/templ v0.3.1020
 	github.com/go-telegram/bot v1.22.0
 	github.com/google/uuid v1.6.0
@@ -65,6 +66,7 @@ require (
 	github.com/spf13/cast v1.9.2 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/spyzhov/ajson v0.8.0 // indirect
 	github.com/sqlc-dev/doubleclick v1.0.0 // indirect
 	github.com/sqlc-dev/sqlc v1.31.1 // indirect
 	github.com/tdewolff/parse/v2 v2.8.3 // indirect
