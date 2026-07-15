@@ -346,72 +346,108 @@ func (t *TelegramBot) handlePing(ctx context.Context, b *bot.Bot, update *models
 	t.sendText(ctx, b, update.Message.Chat.ID, pong)
 }
 
-func (t *TelegramBot) handleReceipt(ctx context.Context, b *bot.Bot, update *models.Update) {
-	slog.Info("entry")
-	user := domains.UserFromContext(ctx)
-	userInput := strings.TrimSpace(update.Message.Caption)
-	photo := update.Message.Photo
-	if len(photo) == 0 {
-		slog.Error("expected a photo but got any empty array", "chatID", user.TelegramID())
-		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
-		return
-	}
-	lgPhoto := photo[len(photo)-1]
-	fileID := lgPhoto.FileID
-	// Download the file
-	file, err := t.bot.GetFile(ctx, &bot.GetFileParams{
-		FileID: fileID,
+// react sets (or replaces) the bot's emoji reaction on a message. The emoji
+// must be on Telegram's allowed-reaction list. Reactions are the receipt
+// flow's status channel: 👨‍💻 working, 👍 booked, 👎 failed.
+func (t *TelegramBot) react(ctx context.Context, chatID int64, messageID int, emoji string) {
+	_, err := t.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Reaction: []models.ReactionType{{
+			Type: models.ReactionTypeTypeEmoji,
+			ReactionTypeEmoji: &models.ReactionTypeEmoji{
+				Type:  models.ReactionTypeTypeEmoji,
+				Emoji: emoji,
+			},
+		}},
 	})
 	if err != nil {
-		slog.Error("failed to get attachment file url", "chatID", user.TelegramID(), "err", err)
-		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		slog.Error("failed to set message reaction", "chatID", chatID, "msg", messageID, "err", err)
+	}
+}
+
+// replyText sends an HTML-formatted reply pinned to a specific message.
+// Same static-string contract as sendText.
+func (t *TelegramBot) replyText(ctx context.Context, b *bot.Bot, chatID int64, messageID int, text string) {
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:          chatID,
+		Text:            text,
+		ParseMode:       models.ParseModeHTML,
+		ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+	})
+	if err != nil {
+		slog.Error("failed to send reply", "chatID", chatID, "msg", messageID, "err", err)
+	}
+}
+
+// handleReceipt books a photographed receipt as a manual transaction. Status
+// is reported through reactions on the photo itself — 👨‍💻 while the vision
+// model works, 👍 once the transaction is booked (the announcement card
+// follows via the drain worker), 👎 plus an explanatory reply on failure —
+// so the flow adds no chat clutter beyond the transaction card.
+func (t *TelegramBot) handleReceipt(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	msgID := update.Message.ID
+	userInput := strings.TrimSpace(update.Message.Caption)
+	// fail marks the photo 👎 and explains in a reply pinned to it.
+	fail := func(text string) {
+		t.react(ctx, chatID, msgID, "👎")
+		t.replyText(ctx, b, chatID, msgID, text)
+	}
+	photo := update.Message.Photo
+	if len(photo) == 0 {
+		slog.Error("expected a photo but got an empty array", "chatID", chatID)
+		fail("failed to process attachment, please try again later")
 		return
 	}
-	// 3. Download the actual bytes
+	// Sizes come back smallest-first; the last is the full-resolution photo.
+	lgPhoto := photo[len(photo)-1]
+	file, err := t.bot.GetFile(ctx, &bot.GetFileParams{FileID: lgPhoto.FileID})
+	if err != nil {
+		slog.Error("failed to get attachment file url", "chatID", chatID, "err", err)
+		fail("failed to process attachment, please try again later")
+		return
+	}
 	resp, err := http.Get(t.bot.FileDownloadLink(file))
 	if err != nil {
-		slog.Error("failed to get attachment file url", "chatID", user.TelegramID(), "err", err)
-		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		slog.Error("failed to download attachment", "chatID", chatID, "err", redactURLError(err))
+		fail("failed to process attachment, please try again later")
 		return
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReceiptPhotoBytes+1))
 	if err != nil {
-		slog.Error("failed to get attachment file url", "chatID", user.TelegramID(), "err", err)
-		t.sendText(ctx, b, user.TelegramID(), "failed to process attachment, please try again later")
+		slog.Error("failed to read attachment body", "chatID", chatID, "err", err)
+		fail("failed to process attachment, please try again later")
 		return
 	}
-	t.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("processing image (%s) <%dKiB>, an updated transaction will post soon", userInput, len(data)/1024),
-		ReplyParameters: &models.ReplyParameters{
-			MessageID: update.Message.ID,
-		},
-	})
+	// Accepted: the photo is in hand and the model call is next.
+	t.react(ctx, chatID, msgID, "👨‍💻")
 	receiptJSON, err := processReceiptImage(ctx, data, userInput, t.cfg)
 	if err != nil {
-		slog.Error("failed to process receipt image", "chatID", user.TelegramID(), "err", err)
-		t.sendText(ctx, b, update.Message.Chat.ID, "failed to read that receipt, please try again later")
+		slog.Error("failed to process receipt image", "chatID", chatID, "err", err)
+		fail("failed to read that receipt, please try again later")
 		return
 	}
 	rt, err := parseReceiptTransaction(receiptJSON)
 	if err != nil {
-		slog.Error("model returned unusable receipt json", "chatID", user.TelegramID(), "json", receiptJSON, "err", err)
-		t.sendText(ctx, b, update.Message.Chat.ID,
-			"I couldn't make sense of that receipt. Try a clearer photo, or add context in the caption (e.g. the total and store name).")
+		slog.Error("model returned unusable receipt json", "chatID", chatID, "json", receiptJSON, "err", err)
+		fail("I couldn't make sense of that receipt. Try a clearer photo, or add context in the caption (e.g. the total and store name).")
 		return
 	}
 	txID, err := createManualTransaction(ctx, t.store, t.cfg, user.ID(), rt, receiptJSON)
 	if err != nil {
-		slog.Error("failed to create manual transaction", "chatID", user.TelegramID(), "err", err)
-		t.sendText(ctx, b, update.Message.Chat.ID, errTryLater)
+		slog.Error("failed to create manual transaction", "chatID", chatID, "err", err)
+		fail(errTryLater)
 		return
 	}
-	slog.Info("created manual transaction", "chatID", user.TelegramID(), "tx", txID, "amt", rt.Amount)
+	slog.Info("created manual transaction", "chatID", chatID, "tx", txID, "amt", rt.Amount)
+	t.react(ctx, chatID, msgID, "👍")
 	t.recomputeSpend(ctx)
 	// The row landed at notified = 0; the drain worker announces it with the
-	// usual Spread/Exclude buttons, fulfilling the "will post soon" promise.
-	t.startDrain(update.Message.Chat.ID)
+	// usual Spread/Exclude buttons.
+	t.startDrain(chatID)
 }
 
 func (t *TelegramBot) handleRegistration(ctx context.Context, b *bot.Bot, update *models.Update) {
