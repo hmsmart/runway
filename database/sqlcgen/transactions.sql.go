@@ -24,6 +24,7 @@ UPDATE transactions SET
     payment_channel = ?10,
     pending = 0,
     removed_at = NULL,
+    message_stale = 1,
     raw_json = ?11
 WHERE transactions.plaid_tx_id = ?12
   AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
@@ -71,6 +72,82 @@ func (q *Queries) AdoptPendingTransaction(ctx context.Context, arg AdoptPendingT
 	)
 }
 
+const adoptSettledTransactionByMatch = `-- name: AdoptSettledTransactionByMatch :execresult
+UPDATE transactions SET
+    plaid_tx_id = ?1,
+    date = ?2,
+    authorized_date = COALESCE(?3, authorized_date, date),
+    amount = ?4,
+    name = ?5,
+    merchant_name = ?6,
+    category_primary = ?7,
+    category_detailed = ?8,
+    category_confidence = ?9,
+    payment_channel = ?10,
+    pending = 0,
+    removed_at = NULL,
+    message_stale = 1,
+    raw_json = ?11
+WHERE transactions.tx_id = (
+    SELECT p.tx_id FROM transactions p
+    WHERE p.pending = 1
+      AND p.account_id = ?12
+      AND p.amount = ?4
+      AND COALESCE(p.authorized_date, p.date)
+          BETWEEN date(CAST(?13 AS TEXT), '-7 days')
+              AND CAST(?13 AS TEXT)
+    ORDER BY COALESCE(p.authorized_date, p.date) DESC, p.tx_id ASC
+    LIMIT 1
+)
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
+`
+
+type AdoptSettledTransactionByMatchParams struct {
+	PostedPlaidID      string  `json:"posted_plaid_id"`
+	Date               string  `json:"date"`
+	AuthorizedDate     *string `json:"authorized_date"`
+	Amount             float64 `json:"amount"`
+	Name               string  `json:"name"`
+	MerchantName       *string `json:"merchant_name"`
+	CategoryPrimary    string  `json:"category_primary"`
+	CategoryDetailed   string  `json:"category_detailed"`
+	CategoryConfidence *string `json:"category_confidence"`
+	PaymentChannel     string  `json:"payment_channel"`
+	RawJson            *string `json:"raw_json"`
+	AccountID          string  `json:"account_id"`
+	EffectiveDate      string  `json:"effective_date"`
+}
+
+// Fallback adoption for institutions that reissue pending transaction ids.
+// A reissued pending can be created and settled between two of our syncs, so
+// its add and remove collapse out of the stream: the settled transaction then
+// names a pending id we never received, or carries none at all, and
+// AdoptPendingTransaction has nothing to match. Instead of inserting a
+// duplicate (which re-announces and strands the old row's spread/exclusions),
+// claim the nearest unclaimed pending row on the same account with the same
+// amount whose swipe date sits within a settlement window of the posted
+// transaction's effective date. Nearest-date-first ordering keeps same-amount
+// purchases on different days paired with the right settlement. Same SET list
+// and posted-id guard as AdoptPendingTransaction. (ASCII-only comment: sqlc
+// miscounts multibyte chars and truncates the generated query.)
+func (q *Queries) AdoptSettledTransactionByMatch(ctx context.Context, arg AdoptSettledTransactionByMatchParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, adoptSettledTransactionByMatch,
+		arg.PostedPlaidID,
+		arg.Date,
+		arg.AuthorizedDate,
+		arg.Amount,
+		arg.Name,
+		arg.MerchantName,
+		arg.CategoryPrimary,
+		arg.CategoryDetailed,
+		arg.CategoryConfidence,
+		arg.PaymentChannel,
+		arg.RawJson,
+		arg.AccountID,
+		arg.EffectiveDate,
+	)
+}
+
 const backfillAuthorizedDate = `-- name: BackfillAuthorizedDate :exec
 UPDATE transactions
 SET authorized_date = (
@@ -105,6 +182,15 @@ func (q *Queries) ClearAmortEnd(ctx context.Context, txID string) error {
 	return err
 }
 
+const clearMessageStale = `-- name: ClearMessageStale :exec
+UPDATE transactions SET message_stale = 0 WHERE tx_id = ?
+`
+
+func (q *Queries) ClearMessageStale(ctx context.Context, txID string) error {
+	_, err := q.db.ExecContext(ctx, clearMessageStale, txID)
+	return err
+}
+
 const countPendingNotifications = `-- name: CountPendingNotifications :one
 SELECT COUNT(*) FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
@@ -136,7 +222,7 @@ func (q *Queries) DeleteTransactionsByItem(ctx context.Context, itemID string) e
 }
 
 const getPendingNotifications = `-- name: GetPendingNotifications :many
-SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date FROM transactions
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
@@ -177,6 +263,8 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 			&i.Transaction.RawJson,
 			&i.Transaction.Notified,
 			&i.Transaction.AuthorizedDate,
+			&i.Transaction.TgMessageID,
+			&i.Transaction.MessageStale,
 		); err != nil {
 			return nil, err
 		}
@@ -192,7 +280,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date FROM transactions WHERE tx_id = ?
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date, tg_message_id, message_stale FROM transactions WHERE tx_id = ?
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
@@ -217,6 +305,8 @@ func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction,
 		&i.RawJson,
 		&i.Notified,
 		&i.AuthorizedDate,
+		&i.TgMessageID,
+		&i.MessageStale,
 	)
 	return i, err
 }
@@ -242,6 +332,67 @@ func (q *Queries) ListChatsWithPendingNotifications(ctx context.Context) ([]*int
 			return nil, err
 		}
 		items = append(items, tg_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleMessages = `-- name: ListStaleMessages :many
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale FROM transactions
+JOIN accounts ON accounts.account_id = transactions.account_id
+JOIN items ON items.item_id = accounts.item_id
+JOIN users ON users.id = items.user_id
+WHERE users.tg_id = ? AND transactions.message_stale = 1 AND transactions.removed_at IS NULL
+ORDER BY transactions.date ASC, transactions.tx_id ASC
+LIMIT 50
+`
+
+type ListStaleMessagesRow struct {
+	Transaction Transaction `json:"transaction"`
+}
+
+// Rows whose announcement card no longer matches the database (a pending
+// settled via adoption). The drain worker edits the card and clears the
+// flag; rows with no recorded card just get the flag cleared.
+func (q *Queries) ListStaleMessages(ctx context.Context, tgID *int64) ([]ListStaleMessagesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listStaleMessages, tgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListStaleMessagesRow{}
+	for rows.Next() {
+		var i ListStaleMessagesRow
+		if err := rows.Scan(
+			&i.Transaction.TxID,
+			&i.Transaction.PlaidTxID,
+			&i.Transaction.AccountID,
+			&i.Transaction.Date,
+			&i.Transaction.Amount,
+			&i.Transaction.Name,
+			&i.Transaction.MerchantName,
+			&i.Transaction.CategoryPrimary,
+			&i.Transaction.CategoryDetailed,
+			&i.Transaction.CategoryConfidence,
+			&i.Transaction.PaymentChannel,
+			&i.Transaction.Pending,
+			&i.Transaction.RemovedAt,
+			&i.Transaction.AmortEnd,
+			&i.Transaction.Excluded,
+			&i.Transaction.RawJson,
+			&i.Transaction.Notified,
+			&i.Transaction.AuthorizedDate,
+			&i.Transaction.TgMessageID,
+			&i.Transaction.MessageStale,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -318,11 +469,23 @@ func (q *Queries) ListTransactionsByUser(ctx context.Context, userID string) ([]
 }
 
 const markTransactionNotified = `-- name: MarkTransactionNotified :exec
-UPDATE transactions SET notified = 1 WHERE tx_id = ?
+UPDATE transactions SET notified = 1,
+    tg_message_id = COALESCE(?1, tg_message_id)
+WHERE tx_id = ?2
 `
 
-func (q *Queries) MarkTransactionNotified(ctx context.Context, txID string) error {
-	_, err := q.db.ExecContext(ctx, markTransactionNotified, txID)
+type MarkTransactionNotifiedParams struct {
+	TgMessageID *int64 `json:"tg_message_id"`
+	TxID        string `json:"tx_id"`
+}
+
+// Records the announcement outcome. tg_message_id is NULL when the send
+// failed permanently; COALESCE keeps any previously recorded card in that
+// case. message_stale is deliberately left alone: if an adoption landed
+// between rendering the card and this write, the stale sweep still owes the
+// card an edit.
+func (q *Queries) MarkTransactionNotified(ctx context.Context, arg MarkTransactionNotifiedParams) error {
+	_, err := q.db.ExecContext(ctx, markTransactionNotified, arg.TgMessageID, arg.TxID)
 	return err
 }
 

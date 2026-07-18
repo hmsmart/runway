@@ -63,6 +63,8 @@ type Transaction struct {
 	RawJson            *string `json:"raw_json"`
 	Notified           int64   `json:"notified"`
 	AuthorizedDate     *string `json:"authorized_date"`
+	TgMessageID        *int64  `json:"tg_message_id"`
+	MessageStale       int64   `json:"message_stale"`
 }
 
 type User struct {

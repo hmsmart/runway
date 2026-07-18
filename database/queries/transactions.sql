@@ -47,8 +47,50 @@ UPDATE transactions SET
     payment_channel = sqlc.arg(payment_channel),
     pending = 0,
     removed_at = NULL,
+    message_stale = 1,
     raw_json = sqlc.arg(raw_json)
 WHERE transactions.plaid_tx_id = sqlc.arg(pending_plaid_id)
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = sqlc.arg(posted_plaid_id));
+
+-- name: AdoptSettledTransactionByMatch :execresult
+-- Fallback adoption for institutions that reissue pending transaction ids.
+-- A reissued pending can be created and settled between two of our syncs, so
+-- its add and remove collapse out of the stream: the settled transaction then
+-- names a pending id we never received, or carries none at all, and
+-- AdoptPendingTransaction has nothing to match. Instead of inserting a
+-- duplicate (which re-announces and strands the old row's spread/exclusions),
+-- claim the nearest unclaimed pending row on the same account with the same
+-- amount whose swipe date sits within a settlement window of the posted
+-- transaction's effective date. Nearest-date-first ordering keeps same-amount
+-- purchases on different days paired with the right settlement. Same SET list
+-- and posted-id guard as AdoptPendingTransaction. (ASCII-only comment: sqlc
+-- miscounts multibyte chars and truncates the generated query.)
+UPDATE transactions SET
+    plaid_tx_id = sqlc.arg(posted_plaid_id),
+    date = sqlc.arg(date),
+    authorized_date = COALESCE(sqlc.arg(authorized_date), authorized_date, date),
+    amount = sqlc.arg(amount),
+    name = sqlc.arg(name),
+    merchant_name = sqlc.arg(merchant_name),
+    category_primary = sqlc.arg(category_primary),
+    category_detailed = sqlc.arg(category_detailed),
+    category_confidence = sqlc.arg(category_confidence),
+    payment_channel = sqlc.arg(payment_channel),
+    pending = 0,
+    removed_at = NULL,
+    message_stale = 1,
+    raw_json = sqlc.arg(raw_json)
+WHERE transactions.tx_id = (
+    SELECT p.tx_id FROM transactions p
+    WHERE p.pending = 1
+      AND p.account_id = sqlc.arg(account_id)
+      AND p.amount = sqlc.arg(amount)
+      AND COALESCE(p.authorized_date, p.date)
+          BETWEEN date(CAST(sqlc.arg(effective_date) AS TEXT), '-7 days')
+              AND CAST(sqlc.arg(effective_date) AS TEXT)
+    ORDER BY COALESCE(p.authorized_date, p.date) DESC, p.tx_id ASC
+    LIMIT 1
+)
   AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = sqlc.arg(posted_plaid_id));
 
 -- name: BackfillAuthorizedDate :exec
@@ -107,7 +149,29 @@ JOIN users ON users.id = items.user_id
 WHERE users.tg_id IS NOT NULL AND transactions.notified = 0 AND transactions.removed_at IS NULL;
 
 -- name: MarkTransactionNotified :exec
-UPDATE transactions SET notified = 1 WHERE tx_id = ?;
+-- Records the announcement outcome. tg_message_id is NULL when the send
+-- failed permanently; COALESCE keeps any previously recorded card in that
+-- case. message_stale is deliberately left alone: if an adoption landed
+-- between rendering the card and this write, the stale sweep still owes the
+-- card an edit.
+UPDATE transactions SET notified = 1,
+    tg_message_id = COALESCE(sqlc.arg(tg_message_id), tg_message_id)
+WHERE tx_id = sqlc.arg(tx_id);
+
+-- name: ListStaleMessages :many
+-- Rows whose announcement card no longer matches the database (a pending
+-- settled via adoption). The drain worker edits the card and clears the
+-- flag; rows with no recorded card just get the flag cleared.
+SELECT sqlc.embed(transactions) FROM transactions
+JOIN accounts ON accounts.account_id = transactions.account_id
+JOIN items ON items.item_id = accounts.item_id
+JOIN users ON users.id = items.user_id
+WHERE users.tg_id = ? AND transactions.message_stale = 1 AND transactions.removed_at IS NULL
+ORDER BY transactions.date ASC, transactions.tx_id ASC
+LIMIT 50;
+
+-- name: ClearMessageStale :exec
+UPDATE transactions SET message_stale = 0 WHERE tx_id = ?;
 
 -- name: DeleteTransactionsByItem :exec
 DELETE FROM transactions WHERE account_id IN (SELECT account_id FROM accounts WHERE item_id = ?);

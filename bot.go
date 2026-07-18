@@ -1017,6 +1017,8 @@ func (t *TelegramBot) drainWorker(chatID int64, kick chan struct{}) {
 // drainChat announces this chat's unsent transactions oldest-first, marking
 // each row as it goes, and returns once the pending queue is empty. It
 // re-queries between batches so rows inserted mid-drain join in date order.
+// Each pass first refreshes stale cards (pendings that settled), so an edit
+// never lands after the announcement loop has already rendered fresh state.
 func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 	announced := false
 	for {
@@ -1026,6 +1028,9 @@ func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 		windowCutoff := time.Now().AddDate(0, 0, -notifyWindowDays).Format(time.DateOnly)
 		if err := t.store.MarkUnnotifiableTransactions(ctx, windowCutoff); err != nil {
 			slog.Error("failed to retire unnotifiable transactions", "chatID", chatID, "err", err)
+			return
+		}
+		if !t.sweepStaleMessages(ctx, chatID) {
 			return
 		}
 		rows, err := t.store.GetPendingNotifications(ctx, &chatID)
@@ -1045,7 +1050,8 @@ func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 			tx := row.Transaction
 			// Plaid dates are YYYY-MM-DD, so string comparison is date order.
 			silent := tx.Date < freshCutoff
-			if err := t.sendTransactionNotification(ctx, chatID, tx, silent); err != nil {
+			msgID, err := t.sendTransactionNotification(ctx, chatID, tx, silent)
+			if err != nil {
 				var tooMany *bot.TooManyRequestsError
 				if errors.As(err, &tooMany) {
 					// Rate limited: the row stays pending; wait as told and
@@ -1059,7 +1065,10 @@ func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 				// chat): log and mark below so one row can't wedge the queue.
 				slog.Error("failed to send transaction notification", "chatID", chatID, "tx", tx.TxID, "err", err)
 			}
-			if err := t.store.MarkTransactionNotified(ctx, tx.TxID); err != nil {
+			if err := t.store.MarkTransactionNotified(ctx, sqlcgen.MarkTransactionNotifiedParams{
+				TgMessageID: msgID,
+				TxID:        tx.TxID,
+			}); err != nil {
 				slog.Error("failed to mark transaction notified", "tx", tx.TxID, "err", err)
 				return
 			}
@@ -1070,15 +1079,78 @@ func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 	}
 }
 
-func (t *TelegramBot) sendTransactionNotification(ctx context.Context, chatID int64, tx sqlcgen.Transaction, silent bool) error {
+// sendTransactionNotification returns the sent card's message id, or nil when
+// the send failed.
+func (t *TelegramBot) sendTransactionNotification(ctx context.Context, chatID int64, tx sqlcgen.Transaction, silent bool) (*int64, error) {
 	slog.Info("announcing transaction", "chatID", chatID, "tx", tx.TxID, "amt", tx.Amount, "silent", silent)
-	_, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
+	msg, err := t.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:              chatID,
 		Text:                formatTransactionMessage(tx),
 		ParseMode:           models.ParseModeHTML,
 		ReplyMarkup:         transactionKeyboard(tx.TxID, tx.Excluded == 1),
 		DisableNotification: silent,
 	})
+	if err != nil || msg == nil {
+		return nil, err
+	}
+	id := int64(msg.ID)
+	return &id, nil
+}
+
+// sweepStaleMessages re-edits announcement cards whose rows changed underneath
+// them - a pending that settled via adoption - then marks the settlement with
+// a reaction so the change is noticeable without a new message or ping. Rows
+// with no recorded card (announcement failed, or the row settled before it was
+// ever announced) just get their flag cleared. Edit failures other than rate
+// limiting are permanent (card deleted by auto-delete, or too old to edit):
+// they log and clear so one dead card can't wedge the sweep. Returns false
+// when the context ended and the caller should stop.
+func (t *TelegramBot) sweepStaleMessages(ctx context.Context, chatID int64) bool {
+	rows, err := t.store.ListStaleMessages(ctx, &chatID)
+	if err != nil {
+		slog.Error("failed to list stale messages", "chatID", chatID, "err", err)
+		return true
+	}
+	for _, row := range rows {
+		tx := row.Transaction
+		if tx.TgMessageID != nil {
+			err := t.editTransactionMessage(ctx, chatID, *tx.TgMessageID, tx)
+			var tooMany *bot.TooManyRequestsError
+			if errors.As(err, &tooMany) {
+				// Leave the flag set; the next kick retries this card.
+				return sleepCtx(ctx, time.Duration(tooMany.RetryAfter)*time.Second)
+			}
+			if err != nil {
+				slog.Warn("failed to refresh transaction card", "chatID", chatID, "tx", tx.TxID, "err", err)
+			} else {
+				t.react(ctx, chatID, int(*tx.TgMessageID), "👌")
+			}
+		}
+		if err := t.store.ClearMessageStale(ctx, tx.TxID); err != nil {
+			slog.Error("failed to clear stale message flag", "tx", tx.TxID, "err", err)
+			return true
+		}
+		if !sleepCtx(ctx, notifyPause()) {
+			return false
+		}
+	}
+	return true
+}
+
+// editTransactionMessage rewrites an announcement card from the row's current
+// state, same render as refreshMessage. Telegram rejects edits that change
+// nothing; that means the card is already right, so it counts as success.
+func (t *TelegramBot) editTransactionMessage(ctx context.Context, chatID, messageID int64, tx sqlcgen.Transaction) error {
+	_, err := t.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:      chatID,
+		MessageID:   int(messageID),
+		Text:        formatTransactionMessage(tx),
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: transactionKeyboard(tx.TxID, tx.Excluded == 1),
+	})
+	if err != nil && strings.Contains(err.Error(), "message is not modified") {
+		return nil
+	}
 	return err
 }
 

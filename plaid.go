@@ -124,6 +124,21 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 					continue
 				}
 			}
+			// The id-based adopt misses when the institution reissues pending
+			// ids: a reissue that settles between syncs never reaches us, so
+			// the settled transaction names a pending id we don't hold (or
+			// none at all). Claim a matching unclaimed pending row by account,
+			// amount, and swipe-date window before inserting a duplicate.
+			if !tx.GetPending() {
+				res, err := q.AdoptSettledTransactionByMatch(ctx, matchAdoptParams(params))
+				if err != nil {
+					return fmt.Errorf("adopt settled transaction %s by match: %w", params.PlaidTxID, err)
+				}
+				if n, err := res.RowsAffected(); err == nil && n == 1 {
+					slog.Info("adopted pending transaction by match", "posted", params.PlaidTxID)
+					continue
+				}
+			}
 			if _, err := q.UpsertTransaction(ctx, params); err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
 			}
@@ -183,6 +198,31 @@ func adoptParams(p sqlcgen.UpsertTransactionParams, pendingPlaidID string) sqlcg
 		PaymentChannel:     p.PaymentChannel,
 		RawJson:            p.RawJson,
 		PendingPlaidID:     pendingPlaidID,
+	}
+}
+
+// matchAdoptParams maps an upsert's fields onto the fallback adopt query. The
+// effective date is the settled transaction's swipe date when Plaid supplies
+// it, else its posted date; the query anchors the settlement window there.
+func matchAdoptParams(p sqlcgen.UpsertTransactionParams) sqlcgen.AdoptSettledTransactionByMatchParams {
+	effective := p.Date
+	if p.AuthorizedDate != nil {
+		effective = *p.AuthorizedDate
+	}
+	return sqlcgen.AdoptSettledTransactionByMatchParams{
+		PostedPlaidID:      p.PlaidTxID,
+		Date:               p.Date,
+		AuthorizedDate:     p.AuthorizedDate,
+		Amount:             p.Amount,
+		Name:               p.Name,
+		MerchantName:       p.MerchantName,
+		CategoryPrimary:    p.CategoryPrimary,
+		CategoryDetailed:   p.CategoryDetailed,
+		CategoryConfidence: p.CategoryConfidence,
+		PaymentChannel:     p.PaymentChannel,
+		RawJson:            p.RawJson,
+		AccountID:          p.AccountID,
+		EffectiveDate:      effective,
 	}
 }
 
