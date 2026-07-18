@@ -1,0 +1,58 @@
+package templates
+
+import (
+    "fmt"
+    "strings"
+
+    "github.com/hmsmart/runway/domains"
+)
+
+templ TransactionPage(name string, transList []domains.TransactionRow) {
+    @Layout("transactions") {
+        <hgroup>
+            <h1>welcome back, { strings.ToLower(name) }</h1>
+            <p>your transactions</p>
+        </hgroup>
+        <table>
+            <thead>
+                <tr>
+                    <th>date</th>
+                    <th>account</th>
+                    <th>description</th>
+                    <th>amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                for _, tx := range transList {
+                    <tr class={ rowClass(tx) }>
+                        <td class="date" data-spread={ tx.Spread() }>{ tx.Date() }</td>
+                        <td>{ strings.ToLower(tx.Account()) }</td>
+                        <td>{ strings.ToLower(tx.Description()) }</td>
+                        <td>{ formatAmount(tx.Amount()) }</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+
+// rowClass composes the excluded/spread modifier classes the chart-theme
+// stylesheet keys off of (style.css: tr.excluded, tr.spread td.date::after).
+func rowClass(tx domains.TransactionRow) string {
+    var classes []string
+    if tx.Excluded() {
+        classes = append(classes, "excluded")
+    }
+    if tx.Spread() != "" {
+        classes = append(classes, "spread")
+    }
+    return strings.Join(classes, " ")
+}
+
+func formatAmount(amount float64) string {
+    sign := ""
+    if amount < 0 {
+        sign, amount = "-", -amount
+    }
+    return fmt.Sprintf("%s$%.2f", sign, amount)
+}

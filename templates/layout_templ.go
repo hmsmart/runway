@@ -46,7 +46,7 @@ func Layout(title string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "]</title><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><link rel=\"stylesheet\" href=\"/assets/css/pico.classless.slate.min.css\"><link rel=\"stylesheet\" href=\"/assets/css/style.css?v=3\"></head><body><header>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "]</title><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><link rel=\"stylesheet\" href=\"/assets/css/pico.classless.slate.min.css\"><link rel=\"stylesheet\" href=\"/assets/css/style.css?v=6\"><style>\n                @import url('https://fonts.googleapis.com/css2?family=Iosevka+Charon+Mono:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap');\n            </style></head><body><header>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -100,7 +100,7 @@ func Nav() templ.Component {
 			return templ_7745c5c3_Err
 		}
 		if domains.UserFromContext(ctx) != nil {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<li><a href=\"/dashboard\">dashboard</a></li><li><a href=\"/link\">link</a></li><li><a href=\"/logout\">logout</a></li>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<li><a href=\"/dashboard\">dashboard</a></li><li><a href=\"/transactions\">transactions</a></li><li><a href=\"/link\">link</a></li><li><a href=\"/logout\">logout</a></li>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

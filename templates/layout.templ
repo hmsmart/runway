@@ -11,12 +11,11 @@ templ Layout(title string) {
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <meta name="color-scheme" content="light dark">
-            <link
-            rel="stylesheet"
-            href="/assets/css/pico.classless.slate.min.css"
-            >
-            <link rel="stylesheet" href="/assets/css/style.css?v=3">
-
+            <link rel="stylesheet" href="/assets/css/pico.classless.slate.min.css">
+            <link rel="stylesheet" href="/assets/css/style.css?v=6">
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Iosevka+Charon+Mono:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap');
+            </style>
         </head>
         <body>
             <header>
@@ -49,6 +48,7 @@ templ Nav() {
         <ul>
             if domains.UserFromContext(ctx) != nil {
                 <li><a href="/dashboard">dashboard</a></li>
+                <li><a href="/transactions">transactions</a></li>
                 <li><a href="/link">link</a></li>
                 <li><a href="/logout">logout</a></li>
             } else {

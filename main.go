@@ -111,6 +111,7 @@ func run(ctx context.Context) error {
 	mux.Handle("GET /dash", handleDash(store))
 	mux.Handle("POST /dash", handleMagicConfirm(store, "/dashboard"))
 	mux.Handle("GET /dashboard", requireSession(handleDashboard))
+	mux.Handle("GET /transactions", requireSession(handleTransactions(store)))
 	mux.Handle("GET /charts/heatmap", requireSession(handleChartHeatmap(store)))
 	mux.Handle("GET /charts/trend", requireSession(handleChartTrend(store)))
 	mux.Handle("GET /charts/category/bars", requireSession(handleChartCategoryBars(store)))

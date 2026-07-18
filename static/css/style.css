@@ -1,3 +1,4 @@
+
 body {
     display: flex;
     flex-direction: column;
@@ -23,6 +24,48 @@ profile-pic img {
   object-fit: cover;
   border-radius: 50%;
 }
+
+thead {
+  font-family: "Iosevka Charon Mono", monospace;
+  font-weight: 500;
+  font-style: normal;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+tbody {
+  font-family: "Iosevka Charon Mono", monospace;
+  font-weight: 300;
+  font-style: normal;
+  font-size: 0.8125rem;
+}
+
+tbody td, thead th {
+  font-variant-numeric: tabular-nums;
+}
+
+td:last-child, th:last-child {
+  text-align: right;
+}
+
+td:first-child, td:last-child {
+  white-space: nowrap;
+}
+
+tr.excluded {
+  text-decoration: line-through;
+  opacity: 0.4;
+}
+
+tr.spread td.date::after {
+  content: attr(data-spread);
+  display: block;
+  font-size: 0.625rem;
+  opacity: 0.5;
+  font-style: italic;
+}
+
 
 /* ---------------------------------------------------------------------------
  * Chart theme

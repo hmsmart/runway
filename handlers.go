@@ -260,6 +260,29 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleTransactions(store *database.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		// requireSession guarantees a user is present.
+		user := domains.UserFromContext(r.Context())
+		rows, err := store.ListTransactionsByUser(r.Context(), user.ID())
+		if err != nil {
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error", "err", err)
+			return
+		}
+		transList := make([]domains.TransactionRow, 0, len(rows))
+		for _, row := range rows {
+			transList = append(transList, domains.NewTransactionRow(
+				row.Date, row.AccountName, row.Description, row.Amount,
+				row.Excluded != 0, row.RawDate, row.AmortEnd,
+			))
+		}
+		if err := templates.TransactionPage(user.FirstName(), transList).Render(r.Context(), w); err != nil {
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error")
+		}
+	}
+}
+
 // handleLogin points browsers without a session at the bot; anyone already
 // signed in skips straight to the dashboard.
 func handleLogin(w http.ResponseWriter, r *http.Request) {

@@ -252,6 +252,71 @@ func (q *Queries) ListChatsWithPendingNotifications(ctx context.Context) ([]*int
 	return items, nil
 }
 
+const listTransactionsByUser = `-- name: ListTransactionsByUser :many
+SELECT
+    t.tx_id,
+    CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date,
+    a.name AS account_name,
+    COALESCE(t.merchant_name, t.name) AS description,
+    t.amount,
+    t.excluded,
+    t.date AS raw_date,
+    t.amort_end
+FROM transactions t
+JOIN accounts a ON a.account_id = t.account_id
+JOIN items i ON i.item_id = a.item_id
+WHERE i.user_id = ?
+  AND t.removed_at IS NULL
+  AND a.tracked = 1
+ORDER BY date DESC, t.tx_id DESC
+`
+
+type ListTransactionsByUserRow struct {
+	TxID        string  `json:"tx_id"`
+	Date        string  `json:"date"`
+	AccountName string  `json:"account_name"`
+	Description string  `json:"description"`
+	Amount      float64 `json:"amount"`
+	Excluded    int64   `json:"excluded"`
+	RawDate     string  `json:"raw_date"`
+	AmortEnd    *string `json:"amort_end"`
+}
+
+// Feeds the /transactions table. Unlike ListSpendTransactionsByUser this
+// includes credits and excluded rows: the table renders (and strikes
+// through) exclusions rather than hiding them.
+func (q *Queries) ListTransactionsByUser(ctx context.Context, userID string) ([]ListTransactionsByUserRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTransactionsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTransactionsByUserRow{}
+	for rows.Next() {
+		var i ListTransactionsByUserRow
+		if err := rows.Scan(
+			&i.TxID,
+			&i.Date,
+			&i.AccountName,
+			&i.Description,
+			&i.Amount,
+			&i.Excluded,
+			&i.RawDate,
+			&i.AmortEnd,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markTransactionNotified = `-- name: MarkTransactionNotified :exec
 UPDATE transactions SET notified = 1 WHERE tx_id = ?
 `

@@ -117,3 +117,24 @@ UPDATE transactions SET amort_end = date("date", CAST(sqlc.arg(modifier) AS TEXT
 
 -- name: ClearAmortEnd :exec
 UPDATE transactions SET amort_end = NULL WHERE tx_id = ?;
+
+-- name: ListTransactionsByUser :many
+-- Feeds the /transactions table. Unlike ListSpendTransactionsByUser this
+-- includes credits and excluded rows: the table renders (and strikes
+-- through) exclusions rather than hiding them.
+SELECT
+    t.tx_id,
+    CAST(COALESCE(t.authorized_date, t.date) AS TEXT) AS date,
+    a.name AS account_name,
+    COALESCE(t.merchant_name, t.name) AS description,
+    t.amount,
+    t.excluded,
+    t.date AS raw_date,
+    t.amort_end
+FROM transactions t
+JOIN accounts a ON a.account_id = t.account_id
+JOIN items i ON i.item_id = a.item_id
+WHERE i.user_id = ?
+  AND t.removed_at IS NULL
+  AND a.tracked = 1
+ORDER BY date DESC, t.tx_id DESC;
