@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hmsmart/runway/database"
@@ -433,6 +434,21 @@ func TestMergeSettledIntoPending(t *testing.T) {
 	}
 	if n := countTransactions(t, store); n != 1 {
 		t.Errorf("transaction count = %d, want 1 after merge", n)
+	}
+}
+
+// TestExcludedCardRendersStruckThrough: flipping exclusion strikes the card
+// body through and notes it; flipping back restores the plain render.
+func TestExcludedCardRendersStruckThrough(t *testing.T) {
+	tx := sqlcgen.Transaction{Amount: 12.34, Name: "Test Merchant", Date: "2026-07-16"}
+	plain := formatTransactionMessage(tx)
+	if strings.Contains(plain, "<s>") || strings.Contains(plain, "excluded from spend") {
+		t.Errorf("included card must not be struck through: %q", plain)
+	}
+	tx.Excluded = 1
+	struck := formatTransactionMessage(tx)
+	if !strings.HasPrefix(struck, "<s>") || !strings.Contains(struck, "</s>\n🚫 <i>excluded from spend</i>") {
+		t.Errorf("excluded card should strike the body and note exclusion: %q", struck)
 	}
 }
 

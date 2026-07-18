@@ -1265,7 +1265,7 @@ func (t *TelegramBot) editRemovedTransactionMessage(ctx context.Context, chatID,
 	_, err := t.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    chatID,
 		MessageID: int(messageID),
-		Text:      "<s>" + formatTransactionMessage(tx) + "</s>\n<i>" + note + "</i>",
+		Text:      "<s>" + formatTransactionBody(tx) + "</s>\n<i>" + note + "</i>",
 		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil && strings.Contains(err.Error(), "message is not modified") {
@@ -1433,7 +1433,21 @@ func humanDuration(d time.Duration) string {
 	return "1 minute"
 }
 
+// formatTransactionMessage renders a transaction's announcement card. An
+// excluded row renders struck through with the exclusion noted below it, so a
+// glance at the chat shows it no longer counts - no reaction accompanies it,
+// since the user flipped the switch themselves.
 func formatTransactionMessage(tx sqlcgen.Transaction) string {
+	body := formatTransactionBody(tx)
+	if tx.Excluded == 1 {
+		return "<s>" + body + "</s>\n🚫 <i>excluded from spend</i>"
+	}
+	return body
+}
+
+// formatTransactionBody is the card text without exclusion styling; the
+// removed-row tombstone wraps this directly so strikes never nest.
+func formatTransactionBody(tx sqlcgen.Transaction) string {
 	var b strings.Builder
 
 	// Header — merchant or name, fallback to "Unknown"
@@ -1477,10 +1491,6 @@ func formatTransactionMessage(tx sqlcgen.Transaction) string {
 
 	if tx.AmortEnd != nil {
 		b.WriteString(fmt.Sprintf("\n📊 <i>spread until %s</i>", html.EscapeString(humanDate(*tx.AmortEnd))))
-	}
-
-	if tx.Excluded == 1 {
-		b.WriteString("\n🚫 <i>excluded from spend</i>")
 	}
 
 	return b.String()
