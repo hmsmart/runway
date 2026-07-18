@@ -182,6 +182,15 @@ func (q *Queries) ClearAmortEnd(ctx context.Context, txID string) error {
 	return err
 }
 
+const clearMergeCandidate = `-- name: ClearMergeCandidate :exec
+UPDATE transactions SET merge_candidate_tx_id = NULL WHERE tx_id = ?
+`
+
+func (q *Queries) ClearMergeCandidate(ctx context.Context, txID string) error {
+	_, err := q.db.ExecContext(ctx, clearMergeCandidate, txID)
+	return err
+}
+
 const clearMessageStale = `-- name: ClearMessageStale :exec
 UPDATE transactions SET message_stale = 0 WHERE tx_id = ?
 `
@@ -212,6 +221,15 @@ func (q *Queries) CountPendingNotifications(ctx context.Context, arg CountPendin
 	return count, err
 }
 
+const deleteTransactionByTxID = `-- name: DeleteTransactionByTxID :exec
+DELETE FROM transactions WHERE tx_id = ?
+`
+
+func (q *Queries) DeleteTransactionByTxID(ctx context.Context, txID string) error {
+	_, err := q.db.ExecContext(ctx, deleteTransactionByTxID, txID)
+	return err
+}
+
 const deleteTransactionsByItem = `-- name: DeleteTransactionsByItem :exec
 DELETE FROM transactions WHERE account_id IN (SELECT account_id FROM accounts WHERE item_id = ?)
 `
@@ -221,8 +239,41 @@ func (q *Queries) DeleteTransactionsByItem(ctx context.Context, itemID string) e
 	return err
 }
 
+const findTipRangeCandidate = `-- name: FindTipRangeCandidate :one
+SELECT p.tx_id FROM transactions p
+WHERE p.pending = 1
+  AND p.account_id = ?1
+  AND CAST(?2 AS REAL) > p.amount
+  AND CAST(?2 AS REAL) <= p.amount * 1.5
+  AND COALESCE(p.authorized_date, p.date)
+      BETWEEN date(CAST(?3 AS TEXT), '-7 days')
+          AND CAST(?3 AS TEXT)
+ORDER BY COALESCE(p.authorized_date, p.date) DESC, p.tx_id ASC
+LIMIT 1
+`
+
+type FindTipRangeCandidateParams struct {
+	AccountID     string  `json:"account_id"`
+	Amount        float64 `json:"amount"`
+	EffectiveDate string  `json:"effective_date"`
+}
+
+// An unclaimed pending row that looks like the tip-adjusted original of a
+// settled transaction: same account, swipe date within the settlement window,
+// and the settled amount above the pending amount but within 1.5x of it -
+// restaurant tips land here, while a gas-station $1 preauth against a $45
+// settlement stays out and is left to fall off. Exact amounts never reach
+// this query; they auto-adopt. The match is only recorded as an offer on the
+// settled row; the user confirms from the chat card.
+func (q *Queries) FindTipRangeCandidate(ctx context.Context, arg FindTipRangeCandidateParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, findTipRangeCandidate, arg.AccountID, arg.Amount, arg.EffectiveDate)
+	var tx_id string
+	err := row.Scan(&tx_id)
+	return tx_id, err
+}
+
 const getPendingNotifications = `-- name: GetPendingNotifications :many
-SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale FROM transactions
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale, transactions.merge_candidate_tx_id FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
@@ -265,6 +316,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 			&i.Transaction.AuthorizedDate,
 			&i.Transaction.TgMessageID,
 			&i.Transaction.MessageStale,
+			&i.Transaction.MergeCandidateTxID,
 		); err != nil {
 			return nil, err
 		}
@@ -280,7 +332,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date, tg_message_id, message_stale FROM transactions WHERE tx_id = ?
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date, tg_message_id, message_stale, merge_candidate_tx_id FROM transactions WHERE tx_id = ?
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
@@ -307,6 +359,7 @@ func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction,
 		&i.AuthorizedDate,
 		&i.TgMessageID,
 		&i.MessageStale,
+		&i.MergeCandidateTxID,
 	)
 	return i, err
 }
@@ -343,11 +396,11 @@ func (q *Queries) ListChatsWithPendingNotifications(ctx context.Context) ([]*int
 }
 
 const listStaleMessages = `-- name: ListStaleMessages :many
-SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale FROM transactions
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale, transactions.merge_candidate_tx_id FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
-WHERE users.tg_id = ? AND transactions.message_stale = 1 AND transactions.removed_at IS NULL
+WHERE users.tg_id = ? AND transactions.message_stale = 1
 ORDER BY transactions.date ASC, transactions.tx_id ASC
 LIMIT 50
 `
@@ -356,9 +409,10 @@ type ListStaleMessagesRow struct {
 	Transaction Transaction `json:"transaction"`
 }
 
-// Rows whose announcement card no longer matches the database (a pending
-// settled via adoption). The drain worker edits the card and clears the
-// flag; rows with no recorded card just get the flag cleared.
+// Rows whose announcement card no longer matches the database: a pending
+// settled via adoption, or a removed row (fell-off preauth) whose card gets
+// struck through. Removed rows are deliberately included, unlike the notify
+// queries. Rows with no recorded card just get the flag cleared.
 func (q *Queries) ListStaleMessages(ctx context.Context, tgID *int64) ([]ListStaleMessagesRow, error) {
 	rows, err := q.db.QueryContext(ctx, listStaleMessages, tgID)
 	if err != nil {
@@ -389,6 +443,7 @@ func (q *Queries) ListStaleMessages(ctx context.Context, tgID *int64) ([]ListSta
 			&i.Transaction.AuthorizedDate,
 			&i.Transaction.TgMessageID,
 			&i.Transaction.MessageStale,
+			&i.Transaction.MergeCandidateTxID,
 		); err != nil {
 			return nil, err
 		}
@@ -502,6 +557,65 @@ func (q *Queries) MarkUnnotifiableTransactions(ctx context.Context, cutoff strin
 	return err
 }
 
+const mergeSettledIntoPending = `-- name: MergeSettledIntoPending :execresult
+UPDATE transactions SET
+    plaid_tx_id = ?1,
+    date = ?2,
+    authorized_date = COALESCE(?3, authorized_date, date),
+    amount = ?4,
+    name = ?5,
+    merchant_name = ?6,
+    category_primary = ?7,
+    category_detailed = ?8,
+    category_confidence = ?9,
+    payment_channel = ?10,
+    pending = 0,
+    removed_at = NULL,
+    message_stale = 1,
+    raw_json = ?11
+WHERE transactions.tx_id = ?12
+  AND transactions.pending = 1
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
+`
+
+type MergeSettledIntoPendingParams struct {
+	PostedPlaidID      string  `json:"posted_plaid_id"`
+	Date               string  `json:"date"`
+	AuthorizedDate     *string `json:"authorized_date"`
+	Amount             float64 `json:"amount"`
+	Name               string  `json:"name"`
+	MerchantName       *string `json:"merchant_name"`
+	CategoryPrimary    string  `json:"category_primary"`
+	CategoryDetailed   string  `json:"category_detailed"`
+	CategoryConfidence *string `json:"category_confidence"`
+	PaymentChannel     string  `json:"payment_channel"`
+	RawJson            *string `json:"raw_json"`
+	PendingTxID        string  `json:"pending_tx_id"`
+}
+
+// User-confirmed merge: fold a settled row's identity and values onto its
+// pending sibling, keeping the pending row's tx_id (spread, exclusion, card).
+// The caller deletes the settled row in the same database transaction first,
+// so the unique plaid id is free to move. The amount is the settled one -
+// that is the whole point of a tip merge. Guards mirror the adopt queries:
+// the pending row must still be unclaimed and the posted id unused.
+func (q *Queries) MergeSettledIntoPending(ctx context.Context, arg MergeSettledIntoPendingParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, mergeSettledIntoPending,
+		arg.PostedPlaidID,
+		arg.Date,
+		arg.AuthorizedDate,
+		arg.Amount,
+		arg.Name,
+		arg.MerchantName,
+		arg.CategoryPrimary,
+		arg.CategoryDetailed,
+		arg.CategoryConfidence,
+		arg.PaymentChannel,
+		arg.RawJson,
+		arg.PendingTxID,
+	)
+}
+
 const setAmortEnd = `-- name: SetAmortEnd :exec
 UPDATE transactions SET amort_end = date("date", CAST(?1 AS TEXT)) WHERE tx_id = ?2
 `
@@ -531,10 +645,13 @@ func (q *Queries) SetExcluded(ctx context.Context, arg SetExcludedParams) error 
 }
 
 const softDeleteTransaction = `-- name: SoftDeleteTransaction :exec
-UPDATE transactions SET removed_at = datetime('now')
+UPDATE transactions SET removed_at = datetime('now'), message_stale = 1
 WHERE plaid_tx_id = ?
 `
 
+// Flags the card too: a removed row's announcement is now wrong (most often a
+// pending that fell off - a preauth hold - without settling into its card),
+// so the drain worker strikes the card through.
 func (q *Queries) SoftDeleteTransaction(ctx context.Context, plaidTxID string) error {
 	_, err := q.db.ExecContext(ctx, softDeleteTransaction, plaidTxID)
 	return err
@@ -544,9 +661,9 @@ const upsertTransaction = `-- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, authorized_date, amount,
     name, merchant_name, category_primary, category_detailed, category_confidence,
-    payment_channel, pending, raw_json, notified
+    payment_channel, pending, raw_json, notified, merge_candidate_tx_id
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     -- Plaid's authorized date wins when present, but a null must not clobber
@@ -562,7 +679,9 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     payment_channel = excluded.payment_channel,
     pending = excluded.pending,
     removed_at = NULL,
-    raw_json = excluded.raw_json
+    raw_json = excluded.raw_json,
+    -- A replay must not wipe an offer the user hasn't acted on.
+    merge_candidate_tx_id = COALESCE(excluded.merge_candidate_tx_id, merge_candidate_tx_id)
 RETURNING tx_id
 `
 
@@ -582,6 +701,7 @@ type UpsertTransactionParams struct {
 	Pending            int64   `json:"pending"`
 	RawJson            *string `json:"raw_json"`
 	Notified           int64   `json:"notified"`
+	MergeCandidateTxID *string `json:"merge_candidate_tx_id"`
 }
 
 func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) (string, error) {
@@ -601,6 +721,7 @@ func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionPa
 		arg.Pending,
 		arg.RawJson,
 		arg.Notified,
+		arg.MergeCandidateTxID,
 	)
 	var tx_id string
 	err := row.Scan(&tx_id)

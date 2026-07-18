@@ -261,6 +261,8 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleExclude("include:", 0, "Included in spend"), t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "amort:", bot.MatchTypePrefix,
 		chain(t.handleAmortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "merge:", bot.MatchTypePrefix,
+		chain(t.handleMerge, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "mortize:", bot.MatchTypePrefix,
 		chain(t.handleMortize, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "unlink:", bot.MatchTypePrefix,
@@ -975,7 +977,7 @@ func (t *TelegramBot) refreshMessage(ctx context.Context, b *bot.Bot, update *mo
 		MessageID:   msg.ID,
 		Text:        formatTransactionMessage(tx),
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: transactionKeyboard(txID, tx.Excluded == 1),
+		ReplyMarkup: t.transactionKeyboardFor(ctx, tx),
 	})
 	if err != nil {
 		slog.Error("failed to refresh transaction message", "tx", txID, "err", err)
@@ -1087,7 +1089,7 @@ func (t *TelegramBot) sendTransactionNotification(ctx context.Context, chatID in
 		ChatID:              chatID,
 		Text:                formatTransactionMessage(tx),
 		ParseMode:           models.ParseModeHTML,
-		ReplyMarkup:         transactionKeyboard(tx.TxID, tx.Excluded == 1),
+		ReplyMarkup:         t.transactionKeyboardFor(ctx, tx),
 		DisableNotification: silent,
 	})
 	if err != nil || msg == nil {
@@ -1095,6 +1097,100 @@ func (t *TelegramBot) sendTransactionNotification(ctx context.Context, chatID in
 	}
 	id := int64(msg.ID)
 	return &id, nil
+}
+
+// transactionKeyboardFor builds a card's keyboard from the row's state,
+// including the one-tap merge offer when the row still points at a live
+// tip-range candidate. A candidate that has since settled or vanished just
+// means no button; the stored pointer is left to age out harmlessly.
+func (t *TelegramBot) transactionKeyboardFor(ctx context.Context, tx sqlcgen.Transaction) models.InlineKeyboardMarkup {
+	kb := transactionKeyboard(tx.TxID, tx.Excluded == 1)
+	if tx.MergeCandidateTxID == nil || tx.Excluded == 1 {
+		return kb
+	}
+	cand, err := t.store.GetTransaction(ctx, *tx.MergeCandidateTxID)
+	if err != nil || cand.Pending != 1 {
+		return kb
+	}
+	offer := []models.InlineKeyboardButton{{
+		Text:         fmt.Sprintf("🔗 Same as pending %s?", formatDollarsCents(cand.Amount)),
+		CallbackData: "merge:" + tx.TxID,
+	}}
+	kb.InlineKeyboard = append([][]models.InlineKeyboardButton{offer}, kb.InlineKeyboard...)
+	return kb
+}
+
+// handleMerge executes a user-confirmed tip merge: the settled row the tapped
+// card announced is folded onto its pending sibling, whose original card then
+// gets refreshed (new amount, settled state) by the stale sweep. The tapped
+// card itself is deleted - it is fresh, so within Telegram's delete window -
+// or struck through if deletion fails.
+func (t *TelegramBot) handleMerge(ctx context.Context, b *bot.Bot, update *models.Update) {
+	txID := strings.TrimPrefix(update.CallbackQuery.Data, "merge:")
+	settled, err := t.store.GetTransaction(ctx, txID)
+	if err != nil || settled.MergeCandidateTxID == nil {
+		t.answerCallback(ctx, b, update, "Nothing to merge")
+		return
+	}
+	pending, err := t.store.GetTransaction(ctx, *settled.MergeCandidateTxID)
+	if err != nil || pending.Pending != 1 {
+		// The candidate settled on its own (or is gone): retract the offer.
+		if err := t.store.ClearMergeCandidate(ctx, settled.TxID); err != nil {
+			slog.Error("failed to clear merge candidate", "tx", settled.TxID, "err", err)
+		}
+		t.refreshMessage(ctx, b, update, settled.TxID)
+		t.answerCallback(ctx, b, update, "That pending already settled")
+		return
+	}
+	err = t.store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
+		// Delete first so the unique plaid id is free to move onto the
+		// pending row; a failed merge rolls the delete back.
+		if err := q.DeleteTransactionByTxID(ctx, settled.TxID); err != nil {
+			return err
+		}
+		res, err := q.MergeSettledIntoPending(ctx, sqlcgen.MergeSettledIntoPendingParams{
+			PostedPlaidID:      settled.PlaidTxID,
+			Date:               settled.Date,
+			AuthorizedDate:     settled.AuthorizedDate,
+			Amount:             settled.Amount,
+			Name:               settled.Name,
+			MerchantName:       settled.MerchantName,
+			CategoryPrimary:    settled.CategoryPrimary,
+			CategoryDetailed:   settled.CategoryDetailed,
+			CategoryConfidence: settled.CategoryConfidence,
+			PaymentChannel:     settled.PaymentChannel,
+			RawJson:            settled.RawJson,
+			PendingTxID:        pending.TxID,
+		})
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("merge matched %d rows: %w", n, err)
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("failed to merge transactions", "settled", settled.TxID, "pending", pending.TxID, "err", err)
+		t.answerCallback(ctx, b, update, errTryLater)
+		return
+	}
+	slog.Info("merged settled transaction into pending", "settled", settled.TxID, "pending", pending.TxID, "amt", settled.Amount)
+	t.recomputeSpend(ctx)
+	if msg := update.CallbackQuery.Message.Message; msg != nil {
+		_, err := b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: msg.ID})
+		if err != nil {
+			slog.Warn("failed to delete merged card, striking through instead", "chatID", msg.Chat.ID, "msg", msg.ID, "err", err)
+			settled.MergeCandidateTxID = nil
+			if err := t.editRemovedTransactionMessage(ctx, msg.Chat.ID, int64(msg.ID), settled, "merged into the card above"); err != nil {
+				slog.Warn("failed to strike through merged card", "chatID", msg.Chat.ID, "msg", msg.ID, "err", err)
+			}
+		}
+		// The pending row's card refresh (new amount + reaction) rides the
+		// stale sweep.
+		t.startDrain(msg.Chat.ID)
+	}
+	t.answerCallback(ctx, b, update, "Merged")
 }
 
 // sweepStaleMessages re-edits announcement cards whose rows changed underneath
@@ -1114,7 +1210,16 @@ func (t *TelegramBot) sweepStaleMessages(ctx context.Context, chatID int64) bool
 	for _, row := range rows {
 		tx := row.Transaction
 		if tx.TgMessageID != nil {
-			err := t.editTransactionMessage(ctx, chatID, *tx.TgMessageID, tx)
+			// A removed row's card becomes a struck-through tombstone with a
+			// thumbs-down; a settled row's card re-renders and gets an okay.
+			var err error
+			reaction := "👌"
+			if tx.RemovedAt != nil {
+				reaction = "👎"
+				err = t.editRemovedTransactionMessage(ctx, chatID, *tx.TgMessageID, tx, "never settled - dropped by your bank")
+			} else {
+				err = t.editTransactionMessage(ctx, chatID, *tx.TgMessageID, tx)
+			}
 			var tooMany *bot.TooManyRequestsError
 			if errors.As(err, &tooMany) {
 				// Leave the flag set; the next kick retries this card.
@@ -1123,7 +1228,7 @@ func (t *TelegramBot) sweepStaleMessages(ctx context.Context, chatID int64) bool
 			if err != nil {
 				slog.Warn("failed to refresh transaction card", "chatID", chatID, "tx", tx.TxID, "err", err)
 			} else {
-				t.react(ctx, chatID, int(*tx.TgMessageID), "👌")
+				t.react(ctx, chatID, int(*tx.TgMessageID), reaction)
 			}
 		}
 		if err := t.store.ClearMessageStale(ctx, tx.TxID); err != nil {
@@ -1146,7 +1251,22 @@ func (t *TelegramBot) editTransactionMessage(ctx context.Context, chatID, messag
 		MessageID:   int(messageID),
 		Text:        formatTransactionMessage(tx),
 		ParseMode:   models.ParseModeHTML,
-		ReplyMarkup: transactionKeyboard(tx.TxID, tx.Excluded == 1),
+		ReplyMarkup: t.transactionKeyboardFor(ctx, tx),
+	})
+	if err != nil && strings.Contains(err.Error(), "message is not modified") {
+		return nil
+	}
+	return err
+}
+
+// editRemovedTransactionMessage strikes a dead row's card through, appends the
+// reason, and drops the buttons - there is nothing left to classify.
+func (t *TelegramBot) editRemovedTransactionMessage(ctx context.Context, chatID, messageID int64, tx sqlcgen.Transaction, note string) error {
+	_, err := t.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: int(messageID),
+		Text:      "<s>" + formatTransactionMessage(tx) + "</s>\n<i>" + note + "</i>",
+		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil && strings.Contains(err.Error(), "message is not modified") {
 		return nil

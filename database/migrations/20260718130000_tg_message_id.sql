@@ -4,9 +4,15 @@
 -- message_stale flags that the card no longer matches the database (set by
 -- the adopt queries when a pending settles); the drain worker edits the card
 -- and clears the flag.
+-- merge_candidate_tx_id links a settled row to an unclaimed pending row that
+-- looks like its tip-adjusted settlement (same account, close date, amount
+-- within tip range). The chat card offers a one-tap merge; nothing merges
+-- without the user confirming.
 ALTER TABLE transactions ADD COLUMN tg_message_id INTEGER;
 ALTER TABLE transactions ADD COLUMN message_stale INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE transactions ADD COLUMN merge_candidate_tx_id TEXT;
 
 -- +goose Down
+ALTER TABLE transactions DROP COLUMN merge_candidate_tx_id;
 ALTER TABLE transactions DROP COLUMN message_stale;
 ALTER TABLE transactions DROP COLUMN tg_message_id;

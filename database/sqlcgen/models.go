@@ -65,6 +65,7 @@ type Transaction struct {
 	AuthorizedDate     *string `json:"authorized_date"`
 	TgMessageID        *int64  `json:"tg_message_id"`
 	MessageStale       int64   `json:"message_stale"`
+	MergeCandidateTxID *string `json:"merge_candidate_tx_id"`
 }
 
 type User struct {

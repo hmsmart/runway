@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -139,6 +141,23 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 					continue
 				}
 			}
+			// No safe automatic pairing: record a tip-range candidate (if
+			// any) so the announcement card can offer a one-tap merge for
+			// the user to confirm. Way-off amounts (preauth holds) get no
+			// offer; those pendings just fall off when Plaid removes them.
+			if !tx.GetPending() {
+				cand, err := q.FindTipRangeCandidate(ctx, sqlcgen.FindTipRangeCandidateParams{
+					AccountID:     params.AccountID,
+					Amount:        params.Amount,
+					EffectiveDate: effectiveDate(params),
+				})
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("find tip-range candidate for %s: %w", params.PlaidTxID, err)
+				}
+				if err == nil {
+					params.MergeCandidateTxID = &cand
+				}
+			}
 			if _, err := q.UpsertTransaction(ctx, params); err != nil {
 				return fmt.Errorf("upsert transaction %s: %w", tx.GetTransactionId(), err)
 			}
@@ -201,14 +220,18 @@ func adoptParams(p sqlcgen.UpsertTransactionParams, pendingPlaidID string) sqlcg
 	}
 }
 
-// matchAdoptParams maps an upsert's fields onto the fallback adopt query. The
-// effective date is the settled transaction's swipe date when Plaid supplies
-// it, else its posted date; the query anchors the settlement window there.
-func matchAdoptParams(p sqlcgen.UpsertTransactionParams) sqlcgen.AdoptSettledTransactionByMatchParams {
-	effective := p.Date
+// effectiveDate is a transaction's swipe date when Plaid supplies it, else
+// its posted date - the day the matching queries anchor their settlement
+// windows on.
+func effectiveDate(p sqlcgen.UpsertTransactionParams) string {
 	if p.AuthorizedDate != nil {
-		effective = *p.AuthorizedDate
+		return *p.AuthorizedDate
 	}
+	return p.Date
+}
+
+// matchAdoptParams maps an upsert's fields onto the fallback adopt query.
+func matchAdoptParams(p sqlcgen.UpsertTransactionParams) sqlcgen.AdoptSettledTransactionByMatchParams {
 	return sqlcgen.AdoptSettledTransactionByMatchParams{
 		PostedPlaidID:      p.PlaidTxID,
 		Date:               p.Date,
@@ -222,7 +245,7 @@ func matchAdoptParams(p sqlcgen.UpsertTransactionParams) sqlcgen.AdoptSettledTra
 		PaymentChannel:     p.PaymentChannel,
 		RawJson:            p.RawJson,
 		AccountID:          p.AccountID,
-		EffectiveDate:      effective,
+		EffectiveDate:      effectiveDate(p),
 	}
 }
 

@@ -2,9 +2,9 @@
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, authorized_date, amount,
     name, merchant_name, category_primary, category_detailed, category_confidence,
-    payment_channel, pending, raw_json, notified
+    payment_channel, pending, raw_json, notified, merge_candidate_tx_id
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     -- Plaid's authorized date wins when present, but a null must not clobber
@@ -20,7 +20,9 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     payment_channel = excluded.payment_channel,
     pending = excluded.pending,
     removed_at = NULL,
-    raw_json = excluded.raw_json
+    raw_json = excluded.raw_json,
+    -- A replay must not wipe an offer the user hasn't acted on.
+    merge_candidate_tx_id = COALESCE(excluded.merge_candidate_tx_id, merge_candidate_tx_id)
 RETURNING tx_id;
 
 -- name: AdoptPendingTransaction :execresult
@@ -111,8 +113,62 @@ WHERE transactions.plaid_tx_id = sqlc.arg(posted_plaid_id)
 SELECT * FROM transactions WHERE tx_id = ?;
 
 -- name: SoftDeleteTransaction :exec
-UPDATE transactions SET removed_at = datetime('now')
+-- Flags the card too: a removed row's announcement is now wrong (most often a
+-- pending that fell off - a preauth hold - without settling into its card),
+-- so the drain worker strikes the card through.
+UPDATE transactions SET removed_at = datetime('now'), message_stale = 1
 WHERE plaid_tx_id = ?;
+
+-- name: FindTipRangeCandidate :one
+-- An unclaimed pending row that looks like the tip-adjusted original of a
+-- settled transaction: same account, swipe date within the settlement window,
+-- and the settled amount above the pending amount but within 1.5x of it -
+-- restaurant tips land here, while a gas-station $1 preauth against a $45
+-- settlement stays out and is left to fall off. Exact amounts never reach
+-- this query; they auto-adopt. The match is only recorded as an offer on the
+-- settled row; the user confirms from the chat card.
+SELECT p.tx_id FROM transactions p
+WHERE p.pending = 1
+  AND p.account_id = sqlc.arg(account_id)
+  AND CAST(sqlc.arg(amount) AS REAL) > p.amount
+  AND CAST(sqlc.arg(amount) AS REAL) <= p.amount * 1.5
+  AND COALESCE(p.authorized_date, p.date)
+      BETWEEN date(CAST(sqlc.arg(effective_date) AS TEXT), '-7 days')
+          AND CAST(sqlc.arg(effective_date) AS TEXT)
+ORDER BY COALESCE(p.authorized_date, p.date) DESC, p.tx_id ASC
+LIMIT 1;
+
+-- name: DeleteTransactionByTxID :exec
+DELETE FROM transactions WHERE tx_id = ?;
+
+-- name: ClearMergeCandidate :exec
+UPDATE transactions SET merge_candidate_tx_id = NULL WHERE tx_id = ?;
+
+-- name: MergeSettledIntoPending :execresult
+-- User-confirmed merge: fold a settled row's identity and values onto its
+-- pending sibling, keeping the pending row's tx_id (spread, exclusion, card).
+-- The caller deletes the settled row in the same database transaction first,
+-- so the unique plaid id is free to move. The amount is the settled one -
+-- that is the whole point of a tip merge. Guards mirror the adopt queries:
+-- the pending row must still be unclaimed and the posted id unused.
+UPDATE transactions SET
+    plaid_tx_id = sqlc.arg(posted_plaid_id),
+    date = sqlc.arg(date),
+    authorized_date = COALESCE(sqlc.arg(authorized_date), authorized_date, date),
+    amount = sqlc.arg(amount),
+    name = sqlc.arg(name),
+    merchant_name = sqlc.arg(merchant_name),
+    category_primary = sqlc.arg(category_primary),
+    category_detailed = sqlc.arg(category_detailed),
+    category_confidence = sqlc.arg(category_confidence),
+    payment_channel = sqlc.arg(payment_channel),
+    pending = 0,
+    removed_at = NULL,
+    message_stale = 1,
+    raw_json = sqlc.arg(raw_json)
+WHERE transactions.tx_id = sqlc.arg(pending_tx_id)
+  AND transactions.pending = 1
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = sqlc.arg(posted_plaid_id));
 
 -- name: SetExcluded :exec
 UPDATE transactions SET excluded = ? WHERE tx_id = ?;
@@ -159,14 +215,15 @@ UPDATE transactions SET notified = 1,
 WHERE tx_id = sqlc.arg(tx_id);
 
 -- name: ListStaleMessages :many
--- Rows whose announcement card no longer matches the database (a pending
--- settled via adoption). The drain worker edits the card and clears the
--- flag; rows with no recorded card just get the flag cleared.
+-- Rows whose announcement card no longer matches the database: a pending
+-- settled via adoption, or a removed row (fell-off preauth) whose card gets
+-- struck through. Removed rows are deliberately included, unlike the notify
+-- queries. Rows with no recorded card just get the flag cleared.
 SELECT sqlc.embed(transactions) FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
-WHERE users.tg_id = ? AND transactions.message_stale = 1 AND transactions.removed_at IS NULL
+WHERE users.tg_id = ? AND transactions.message_stale = 1
 ORDER BY transactions.date ASC, transactions.tx_id ASC
 LIMIT 50;
 

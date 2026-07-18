@@ -291,6 +291,151 @@ func TestMarkNotifiedKeepsMessageID(t *testing.T) {
 	}
 }
 
+// findByPlaidID scans the user's table rows for the one carrying plaidID.
+func findByPlaidID(t *testing.T, store *database.Store, plaidID string) sqlcgen.Transaction {
+	t.Helper()
+	rows, err := store.ListTransactionsByUser(context.Background(), "u1")
+	if err != nil {
+		t.Fatalf("list transactions: %v", err)
+	}
+	for _, r := range rows {
+		tx, err := store.GetTransaction(context.Background(), r.TxID)
+		if err != nil {
+			t.Fatalf("load %s: %v", r.TxID, err)
+		}
+		if tx.PlaidTxID == plaidID {
+			return tx
+		}
+	}
+	t.Fatalf("no row with plaid id %s", plaidID)
+	return sqlcgen.Transaction{}
+}
+
+// TestTipRangeCandidateRecorded: a settled amount above the pending but within
+// tip range must not auto-merge; it inserts with a merge offer pointing at the
+// pending row, leaving the user to confirm.
+func TestTipRangeCandidateRecorded(t *testing.T) {
+	store, cfg := newSyncFixture(t)
+	pendingTxID := insertPending(t, store, "pend-dinner", "2026-07-16", 20.00)
+
+	persistAdded(t, store, cfg, "c1", settledTx("post-dinner", "pend-ghost", "2026-07-18", "2026-07-16", 24.00))
+
+	settled := findByPlaidID(t, store, "post-dinner")
+	if settled.TxID == pendingTxID {
+		t.Fatal("tip-range settlement must not auto-merge")
+	}
+	if settled.MergeCandidateTxID == nil || *settled.MergeCandidateTxID != pendingTxID {
+		t.Errorf("merge_candidate_tx_id = %v, want %s", settled.MergeCandidateTxID, pendingTxID)
+	}
+	pending, err := store.GetTransaction(context.Background(), pendingTxID)
+	if err != nil {
+		t.Fatalf("load pending: %v", err)
+	}
+	if pending.Pending != 1 {
+		t.Errorf("pending row must stay unclaimed until the user confirms")
+	}
+}
+
+// TestPreauthFallsOff: a $1-style preauth against a much larger settlement is
+// no merge candidate; when Plaid removes the pending, its card is flagged so
+// the sweep can strike it through.
+func TestPreauthFallsOff(t *testing.T) {
+	store, cfg := newSyncFixture(t)
+	ctx := context.Background()
+	pendingTxID := insertPending(t, store, "pend-hold", "2026-07-16", 1.00)
+	msgID := int64(31337)
+	if err := store.MarkTransactionNotified(ctx, sqlcgen.MarkTransactionNotifiedParams{TgMessageID: &msgID, TxID: pendingTxID}); err != nil {
+		t.Fatalf("mark notified: %v", err)
+	}
+
+	persistAdded(t, store, cfg, "c1", settledTx("post-gas", "", "2026-07-18", "2026-07-16", 45.00))
+
+	settled := findByPlaidID(t, store, "post-gas")
+	if settled.MergeCandidateTxID != nil {
+		t.Errorf("preauth must not be offered as a merge candidate, got %v", settled.MergeCandidateTxID)
+	}
+	if err := store.SoftDeleteTransaction(ctx, "pend-hold"); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	row, err := store.GetTransaction(ctx, pendingTxID)
+	if err != nil {
+		t.Fatalf("load removed pending: %v", err)
+	}
+	if row.RemovedAt == nil || row.MessageStale != 1 {
+		t.Errorf("fell-off pending should be removed and card-flagged, got removed_at=%v stale=%d", row.RemovedAt, row.MessageStale)
+	}
+	tgID := int64(999)
+	stale, err := store.ListStaleMessages(ctx, &tgID)
+	if err != nil {
+		t.Fatalf("list stale: %v", err)
+	}
+	if len(stale) != 1 || stale[0].Transaction.TxID != pendingTxID {
+		t.Fatalf("stale list should surface the fell-off pending, got %d rows", len(stale))
+	}
+}
+
+// TestMergeSettledIntoPending exercises the confirmed-merge fold the way
+// handleMerge runs it: delete the settled row, then move its identity and
+// tip-inclusive amount onto the pending row inside one database transaction.
+func TestMergeSettledIntoPending(t *testing.T) {
+	store, cfg := newSyncFixture(t)
+	ctx := context.Background()
+	pendingTxID := insertPending(t, store, "pend-tip", "2026-07-16", 20.00)
+	if err := store.SetAmortEnd(ctx, sqlcgen.SetAmortEndParams{Modifier: "+7 days", TxID: pendingTxID}); err != nil {
+		t.Fatalf("set amort: %v", err)
+	}
+	persistAdded(t, store, cfg, "c1", settledTx("post-tip", "", "2026-07-18", "2026-07-16", 24.00))
+	settled := findByPlaidID(t, store, "post-tip")
+
+	err := store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
+		if err := q.DeleteTransactionByTxID(ctx, settled.TxID); err != nil {
+			return err
+		}
+		res, err := q.MergeSettledIntoPending(ctx, sqlcgen.MergeSettledIntoPendingParams{
+			PostedPlaidID:      settled.PlaidTxID,
+			Date:               settled.Date,
+			AuthorizedDate:     settled.AuthorizedDate,
+			Amount:             settled.Amount,
+			Name:               settled.Name,
+			MerchantName:       settled.MerchantName,
+			CategoryPrimary:    settled.CategoryPrimary,
+			CategoryDetailed:   settled.CategoryDetailed,
+			CategoryConfidence: settled.CategoryConfidence,
+			PaymentChannel:     settled.PaymentChannel,
+			RawJson:            settled.RawJson,
+			PendingTxID:        pendingTxID,
+		})
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n != 1 {
+			t.Fatalf("merge matched %d rows, err %v", n, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("merge tx: %v", err)
+	}
+
+	row, err := store.GetTransaction(ctx, pendingTxID)
+	if err != nil {
+		t.Fatalf("load merged row: %v", err)
+	}
+	if row.PlaidTxID != "post-tip" || row.Pending != 0 || row.Amount != 24.00 {
+		t.Errorf("merged row wrong: plaid=%q pending=%d amount=%v", row.PlaidTxID, row.Pending, row.Amount)
+	}
+	if row.AmortEnd == nil || *row.AmortEnd != "2026-07-23" {
+		t.Errorf("amort_end = %v, want preserved 2026-07-23", row.AmortEnd)
+	}
+	if row.MessageStale != 1 {
+		t.Errorf("merged row should flag its card for refresh")
+	}
+	if n := countTransactions(t, store); n != 1 {
+		t.Errorf("transaction count = %d, want 1 after merge", n)
+	}
+}
+
 func countTransactions(t *testing.T, store *database.Store) int {
 	t.Helper()
 	rows, err := store.ListTransactionsByUser(context.Background(), "u1")
