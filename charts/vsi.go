@@ -41,7 +41,23 @@ func gaugeScaleFromValues(values []float64) GaugeScale {
 	if err != nil {
 		return defaultGaugeScale
 	}
-	return normalizeGaugeScale(roundToStep(p85, 0.5), roundToStep(p95, 0.5), roundToStep(p995, 1))
+
+	// Runway-day deltas are usually much smaller than spend deltas, so use a
+	// finer rounding grid for stable-but-readable breakpoints.
+	innerStep, midStep, outerStep := 0.5, 0.5, 1.0
+	maxAbs := math.Max(math.Abs(p95), math.Abs(p995))
+	switch {
+	case maxAbs < 1:
+		innerStep, midStep, outerStep = 0.05, 0.1, 0.25
+	case maxAbs < 5:
+		innerStep, midStep, outerStep = 0.1, 0.25, 0.5
+	}
+
+	return normalizeGaugeScale(
+		roundToStep(p85, innerStep),
+		roundToStep(p95, midStep),
+		roundToStep(p995, outerStep),
+	)
 }
 
 func normalizeGaugeScale(inner, mid, outer float64) GaugeScale {
@@ -66,19 +82,27 @@ func fmtTick(v float64) string {
 	return strings.TrimSuffix(fmt.Sprintf("%.1f", v), ".0")
 }
 
+// gaugeValueToAngle maps a VSI value to a screen angle using a 3-segment
+// piecewise-linear scale: the inner region is dense (most values live here),
+// the mid region compresses, and the outer region clamps extremes.
+//
+// The full sweep is 320° centered on 9 o'clock (180°):
+//   - Positive (spend falling, good): 180° → 340° (counter-clockwise up-left)
+//   - Negative (spend rising, bad):   180° → 20° (clockwise down-left)
+//   - Zero:                           180° (9 o'clock, horizontal left)
 func gaugeValueToAngle(v float64, scale GaugeScale) float64 {
 	clamped := math.Max(-scale.Outer, math.Min(scale.Outer, v))
-	signed := clamped
-	absV := math.Abs(signed)
+	// Flip sign so positive deltas render on the UP side of the dial.
+	mapped := -clamped
+	absV := math.Abs(mapped)
 	sign := 1.0
-	if signed < 0 {
+	if mapped < 0 {
 		sign = -1
 	}
 
 	if absV <= scale.Inner {
-		return 180 - (signed/scale.Inner)*90
+		return 180 - (mapped/scale.Inner)*90
 	}
-
 	if absV <= scale.Mid {
 		span := (absV - scale.Inner) / (scale.Mid - scale.Inner)
 		if sign > 0 {
@@ -86,7 +110,6 @@ func gaugeValueToAngle(v float64, scale GaugeScale) float64 {
 		}
 		return 270 + span*30
 	}
-
 	span := (absV - scale.Mid) / (scale.Outer - scale.Mid)
 	if sign > 0 {
 		return 60 - span*40
@@ -95,39 +118,69 @@ func gaugeValueToAngle(v float64, scale GaugeScale) float64 {
 }
 
 func gaugeTicks(scale GaugeScale) ([]float64, []float64) {
-	var majors []float64
-	majors = append(majors, 0)
-	innerFloor := int(math.Floor(scale.Inner))
-	maxIntMajor := innerFloor
-	// If the inner breakpoint is fractional, skip the last integer label to
-	// avoid a crowded pair like 6 and 6.5 at the bend.
-	if math.Abs(scale.Inner-float64(innerFloor)) > 0.001 {
-		maxIntMajor = innerFloor - 1
+	appendSym := func(values []float64, v float64) []float64 {
+		if v <= 0 {
+			return values
+		}
+		values = append(values, v, -v)
+		return values
 	}
-	for i := 1; i <= maxIntMajor; i++ {
-		majors = append(majors, float64(i), float64(-i))
-	}
-	if math.Abs(scale.Inner-float64(innerFloor)) > 0.001 {
-		majors = append(majors, scale.Inner, -scale.Inner)
-	} else if innerFloor > 0 {
-		majors = append(majors, float64(innerFloor), float64(-innerFloor))
+	near := func(a, b float64) bool { return math.Abs(a-b) < 0.001 }
+	contains := func(values []float64, v float64) bool {
+		for _, x := range values {
+			if near(x, v) {
+				return true
+			}
+		}
+		return false
 	}
 
+	// Deterministic markers by segment: keep dense ticks in the inner region
+	// (where the dial allocates the most angular resolution) and sparse ticks
+	// beyond the bend.
+	majors := []float64{0}
+	majors = appendSym(majors, scale.Inner)
+	majors = appendSym(majors, scale.Mid)
+	majors = appendSym(majors, scale.Outer)
+
 	var minors []float64
-	for v := 0.5; v < scale.Inner; v += 1 {
-		minors = append(minors, v, -v)
+	if scale.Inner > 0 {
+		// Even subdivisions in the high-resolution inner band (0..p85).
+		innerDivs := 6
+		if scale.Inner <= 1 {
+			innerDivs = 5
+		} else if scale.Inner >= 3 {
+			innerDivs = 8
+		}
+		step := scale.Inner / float64(innerDivs)
+		for i := 1; i < innerDivs; i++ {
+			v := step * float64(i)
+			// Alternate major/minor to keep labels readable while preserving
+			// equal spacing for all ticks.
+			if i%2 == 0 {
+				if !contains(majors, v) {
+					majors = appendSym(majors, v)
+				}
+				continue
+			}
+			if contains(majors, v) {
+				continue
+			}
+			minors = appendSym(minors, v)
+		}
 	}
+
 	return majors, minors
 }
 
 func signedDailyValue(v float64) string {
 	if v == 0 {
-		return "$0.00"
+		return "0.00"
 	}
 	if v > 0 {
-		return fmt.Sprintf("▼$%.2f", v)
+		return fmt.Sprintf("▼%.2f", v)
 	}
-	return fmt.Sprintf("▲$%.2f", math.Abs(v))
+	return fmt.Sprintf("▲%.2f", math.Abs(v))
 }
 
 func renderVSI(current float64, scale GaugeScale) string {
@@ -135,74 +188,100 @@ func renderVSI(current float64, scale GaugeScale) string {
 		w, h   = 200, 200
 		cx     = 100.0
 		cy     = 100.0
-		bezel  = 100.0
-		face   = 94.0
-		tickR  = 94.0
-		needle = 78.0
+		bandR  = 84.0
+		needle = 66.0
 	)
 
 	var b strings.Builder
-	svgOpen(&b, w, h, "vertical speed gauge", `
-.vsi text{font-family:var(--chart-font,system-ui,-apple-system,'Segoe UI',sans-serif)}
-.vsi .label{fill:var(--chart-muted,#6a7280)}
-	.vsi .readout-window{fill:var(--chart-heat-0,#e9ecef);stroke:var(--chart-axis,#c6ccd4);stroke-width:1.5}
-	.vsi .readout{fill:var(--chart-ink,#33383f);font-family:'B612 Mono',var(--chart-font,system-ui,-apple-system,'Segoe UI',sans-serif);font-size:13px;font-weight:700;letter-spacing:0.02em}
-	.vsi .readout-unit{font-size:9px;font-weight:600;letter-spacing:0}
-.vsi .needlep{stroke:#e24b4a;stroke-width:2.5;stroke-linecap:round}
+	svgOpen(&b, w, h, "vertical speed indicator - runway days trend delta", `
+.vsi .readout-window{fill:var(--chart-heat-0,#e9ecef);stroke:var(--chart-axis,#c6ccd4);stroke-width:1.5}
+.vsi .readout{fill:var(--chart-ink,#33383f);font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-size:13px;font-weight:700;letter-spacing:0.02em}
+.vsi .readout-unit{font-size:9px;font-weight:600;letter-spacing:0}
 `)
 	b.WriteString(`<g class="vsi">`)
-	fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="var(--chart-bar,#cdd3da)"/>`, f(cx), f(cy), f(bezel))
-	fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="var(--chart-heat-0,#e9ecef)"/>`, f(cx), f(cy), f(face))
+	bezel(&b, cx, cy)
 
+	// Arc bands: green on the UP side (spend falling = good), amber in shallow
+	// DN, and red on strong DN (spend rising = bad). bandArc draws clockwise,
+	// so each segment is emitted with ascending screen angles.
+	upOuter := gaugeValueToAngle(scale.Outer, scale)
+	upInner := gaugeValueToAngle(scale.Inner, scale)
+	zero := gaugeValueToAngle(0, scale)
+	dnInner := gaugeValueToAngle(-scale.Inner, scale)
+	dnOuter := gaugeValueToAngle(-scale.Outer, scale)
+
+	bandArc(&b, cx, cy, bandR, upInner, upOuter, 6, gaugeGreen)
+	bandArc(&b, cx, cy, bandR, zero, upInner, 6, gaugeGreen)
+	bandArc(&b, cx, cy, bandR, dnInner, zero, 6, gaugeAmber)
+	bandArc(&b, cx, cy, bandR, dnOuter, dnInner, 6, gaugeRed)
+
+	// Major and minor tick marks.
 	majors, minors := gaugeTicks(scale)
+	near := func(a, b float64) bool { return math.Abs(a-b) < 0.001 }
 	for _, v := range majors {
-		a := gaugeValueToAngle(v, scale) * math.Pi / 180
-		len := 10.0
-		wgt := 1.5
+		deg := gaugeValueToAngle(v, scale)
+		length, wgt := 5.0, 1.0
 		if v == 0 || math.Abs(math.Abs(v)-scale.Inner) < 0.001 {
-			len = 14
-			wgt = 2
+			length, wgt = 9, 2
 		}
-		x1 := cx + tickR*math.Cos(a)
-		y1 := cy + tickR*math.Sin(a)
-		x2 := cx + (tickR-len)*math.Cos(a)
-		y2 := cy + (tickR-len)*math.Sin(a)
-		fmt.Fprintf(&b, `<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="var(--chart-ink,#33383f)" stroke-width="%s" stroke-linecap="round"/>`, f(x1), f(y1), f(x2), f(y2), f(wgt))
-		tx := cx + (tickR-len-11)*math.Cos(a)
-		ty := cy + (tickR-len-11)*math.Sin(a)
-		label := fmtTick(math.Abs(v))
-		fmt.Fprintf(&b, `<text x="%s" y="%s" font-size="10" font-weight="700" text-anchor="middle" fill="var(--chart-muted,#6a7280)">%s</text>`, f(tx), f(ty+3.5), esc(label))
+		radialTick(&b, cx, cy, bandR-length, bandR, deg,
+			fmt.Sprintf(`stroke="var(--chart-ink,#33383f)" stroke-width="%s" stroke-linecap="round"`, f(wgt)))
+		absV := math.Abs(v)
+		showLabel := false
+		switch {
+		case near(absV, 0):
+			showLabel = true
+		case near(absV, scale.Inner):
+			// Always label the inner breakpoint; it should sit on a major tick.
+			showLabel = true
+		case absV < scale.Inner-0.001:
+			// Left-half detailed labels.
+			showLabel = true
+		case near(absV, scale.Mid), near(absV, scale.Outer):
+			// Right-half labels only at p95 and p99.5 breakpoints.
+			showLabel = true
+		}
+		if showLabel {
+			// Match fuel gauge label placement so numbers sit closer to ticks.
+			tx, ty := polar(cx, cy, bandR-19, deg)
+			label := fmtTick(absV)
+			fmt.Fprintf(&b, `<text x="%s" y="%s" font-size="10" font-weight="700" text-anchor="middle" class="muted">%s</text>`,
+				f(tx), f(ty+3), esc(label))
+		}
 	}
 	for _, v := range minors {
-		a := gaugeValueToAngle(v, scale) * math.Pi / 180
-		x1 := cx + tickR*math.Cos(a)
-		y1 := cy + tickR*math.Sin(a)
-		x2 := cx + (tickR-6)*math.Cos(a)
-		y2 := cy + (tickR-6)*math.Sin(a)
-		fmt.Fprintf(&b, `<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="var(--chart-ink,#33383f)" stroke-width="1" stroke-linecap="round" opacity="0.8"/>`, f(x1), f(y1), f(x2), f(y2))
+		deg := gaugeValueToAngle(v, scale)
+		radialTick(&b, cx, cy, bandR-6, bandR, deg,
+			`stroke="var(--chart-ink,#33383f)" stroke-width="1" stroke-linecap="round" opacity="0.8"`)
 	}
 
-	for _, v := range []float64{scale.Mid, scale.Outer, -scale.Mid, -scale.Outer} {
-		a := gaugeValueToAngle(v, scale) * math.Pi / 180
-		tx := cx + (tickR-20)*math.Cos(a)
-		ty := cy + (tickR-20)*math.Sin(a)
-		fmt.Fprintf(&b, `<text x="%s" y="%s" font-size="9" font-weight="700" text-anchor="middle" fill="var(--chart-muted,#6a7280)">%s</text>`, f(tx), f(ty+3.5), esc(fmtTick(math.Abs(v))))
-	}
+	// Title and subtitle, matching ASI/Fuel/Corrective style.
+	b.WriteString(`<text x="100" y="58" text-anchor="middle" font-size="10" font-weight="700" class="muted" letter-spacing="0.14em">VSI</text>`)
+	b.WriteString(`<text x="100" y="70" text-anchor="middle" font-size="8" class="muted" letter-spacing="0.08em">DELTA RUNWAY DAYS</text>`)
 
-	// Dial text: up/down hints around the needle.
-	fmt.Fprintf(&b, `<text x="100" y="50" text-anchor="middle" font-size="9" font-weight="700" fill="var(--chart-muted,#6a7280)" letter-spacing="0.08em">UP</text>`)
-	fmt.Fprintf(&b, `<text x="100" y="160" text-anchor="middle" font-size="9" font-weight="700" fill="var(--chart-muted,#6a7280)" letter-spacing="0.08em">DN</text>`)
-	fmt.Fprintf(&b, `<rect x="52" y="118" width="96" height="24" rx="4" class="readout-window"/>`)
-	fmt.Fprintf(&b, `<text x="100" y="134" text-anchor="middle" class="readout"><tspan>%s</tspan><tspan class="readout-unit">/day</tspan></text>`, esc(signedDailyValue(current)))
+	// UP/DN hints near the arc ends.
+	upDeg := gaugeValueToAngle(scale.Inner*0.6, scale)
+	dnDeg := gaugeValueToAngle(-scale.Inner*0.6, scale)
+	upX, upY := polar(cx, cy, bandR-30, upDeg)
+	dnX, dnY := polar(cx, cy, bandR-30, dnDeg)
+	fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="7.5" font-weight="700" style="fill:%s" letter-spacing="0.1em">INC</text>`,
+		f(upX), f(upY+3), gaugeGreen)
+	fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="7.5" font-weight="700" style="fill:%s" letter-spacing="0.1em">DEC</text>`,
+		f(dnX), f(dnY+3), gaugeRed)
 
-	needleAngle := gaugeValueToAngle(current, scale) * math.Pi / 180
-	xn := cx + needle*math.Cos(needleAngle)
-	yn := cy + needle*math.Sin(needleAngle)
-	fmt.Fprintf(&b, `<line x1="%s" y1="%s" x2="%s" y2="%s" class="needlep"/>`, f(cx), f(cy), f(xn), f(yn))
-	fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="7" fill="var(--chart-heat-0,#e9ecef)" stroke="var(--chart-ink,#33383f)" stroke-width="1.5"/>`, f(cx), f(cy))
-	fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="3" fill="var(--chart-ink,#33383f)"/>`, f(cx), f(cy))
+	// Needle — ink-colored, matching ASI/Fuel/Corrective.
+	// Needle direction is intentionally mirrored from raw value so motion
+	// matches runway-day delta semantics on this dial orientation.
+	needleDeg := gaugeValueToAngle(-current, scale)
+	needleLine(&b, cx, cy, needle, needleDeg,
+		`stroke="var(--chart-ink,#33383f)" stroke-width="2.5" stroke-linecap="round"`)
+	hub(&b, cx, cy)
 
-	b.WriteString(`</g>`)
-	b.WriteString("</svg>")
+	// Readout window slightly below the hub center for better balance.
+	b.WriteString(`<rect x="52" y="110" width="96" height="22" rx="4" class="readout-window"/>`)
+	fmt.Fprintf(&b, `<text x="100" y="125" text-anchor="middle" class="readout"><tspan>%s</tspan><tspan class="readout-unit"> d/day</tspan></text>`,
+		esc(signedDailyValue(current)))
+
+	b.WriteString(`</g></svg>`)
 	return b.String()
 }

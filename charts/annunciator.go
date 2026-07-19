@@ -81,6 +81,7 @@ type Annunciator struct {
 	Lamp14    Lamp
 	Lamp28    Lamp
 	LampSync  Lamp
+	LampFuel  Lamp
 	Reduction *SpendReduction // nil when on target
 }
 
@@ -98,14 +99,19 @@ func ComputeAnnunciator(
 	ema14Prev, ema28Prev float64,
 	daysLeft int, remainingBudget float64,
 	syncOK bool,
+	fuelLow bool,
 ) Annunciator {
 	a := Annunciator{
 		Lamp14:   computeLamp("EMA-14", ema14, ema14Prev, targetDaily),
 		Lamp28:   computeLamp("EMA-28", ema28, ema28Prev, targetDaily),
 		LampSync: Lamp{Label: "SYNC", State: LampUnder, Value: "OK"},
+		LampFuel: Lamp{Label: "FUEL", State: LampUnder, Value: "OK"},
 	}
 	if !syncOK {
 		a.LampSync = Lamp{Label: "SYNC", State: LampOver, Value: "STALE"}
+	}
+	if fuelLow {
+		a.LampFuel = Lamp{Label: "FUEL", State: LampOver, Value: "LOW"}
 	}
 
 	// Show spend reduction targets if either lamp is OVER or WARN.
@@ -161,55 +167,77 @@ func computeLamp(label string, current, prev, target float64) Lamp {
 	return l
 }
 
-// AnnunciatorSVG renders the annunciator panel as a standalone SVG document.
+// AnnunciatorSVG renders the CAS-style annunciator panel as a standalone
+// 200x200 SVG. Lamps are dark when nominal (UNDER/OK) and illuminate
+// red (OVER) or amber (WARN) only when active.
 func AnnunciatorSVG(a Annunciator) string {
 	const w, h = 200, 200
 
 	var b strings.Builder
-	svgOpen(&b, w, h, "spend annunciator", `
-.ann-title{font-size:10px;letter-spacing:1.8px}
-.ann-subtitle{font-size:9px;letter-spacing:1.1px}
-.ann-label{font-size:8px;letter-spacing:1.2px}
-.ann-value{font-size:12px;font-weight:700}
-.ann-panel{fill:var(--chart-face,#f8f9fb);stroke:var(--chart-axis,#c6ccd4);stroke-width:1}
-.lamp-under{fill:var(--lamp-under,#eef5e4);stroke:var(--lamp-under-edge,#639922)}
-.lamp-warn{fill:var(--lamp-warn,#fdf3e0);stroke:var(--lamp-warn-edge,#d99114)}
-.lamp-over{fill:var(--lamp-over,#fce8e8);stroke:var(--lamp-over-edge,#e24b4a)}
+	svgOpen(&b, w, h, "spend annunciator - CAS panel", `
+.cas-panel{fill:#0f1318;stroke:var(--chart-axis,#c6ccd4);stroke-width:1.5;rx:10}
+.cas-title{font-size:9px;letter-spacing:2.5px}
+.cas-status{font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-weight:700}
+.cas-faults{font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-size:7px;letter-spacing:1px}
 `)
 
 	b.WriteString(`<g>`)
-	b.WriteString(`<rect x="8" y="8" width="184" height="184" rx="10" class="ann-panel"/>`)
-	b.WriteString(`<text x="100" y="24" text-anchor="middle" class="ann-title muted">SPEND STATUS</text>`)
+	b.WriteString(`<rect x="8" y="8" width="184" height="184" class="cas-panel"/>`)
+	b.WriteString(`<text x="100" y="26" text-anchor="middle" class="cas-title" style="fill:#5a6270">CAS - SPEND</text>`)
 
-	renderLamp := func(x float64, l Lamp) {
-		const lampW = 54.0
-		fmt.Fprintf(&b, `<rect x="%s" y="34" width="%s" height="56" rx="6" class="%s" stroke-width="1.5"/>`, f(x), f(lampW), l.State.CSS())
-		fmt.Fprintf(&b, `<text x="%s" y="47" text-anchor="middle" class="ann-label muted">%s</text>`, f(x+lampW/2), esc(l.Label))
-		status := l.Value
-		if status == "" {
-			status = l.State.String()
-			if arrow := l.Trend.Arrow(); arrow != "" {
-				status += " " + arrow
-			}
+	faults := 0
+	lamps := [4]Lamp{a.Lamp14, a.Lamp28, a.LampSync, a.LampFuel}
+	positions := [4][2]float64{{16, 34}, {104, 34}, {16, 94}, {104, 94}}
+
+	for i, lamp := range lamps {
+		x, y := positions[i][0], positions[i][1]
+		casLamp(&b, x, y, lamp)
+		if lamp.State != LampUnder {
+			faults++
 		}
-		fmt.Fprintf(&b, `<text x="%s" y="70" text-anchor="middle" class="ann-value">%s</text>`, f(x+lampW/2), esc(status))
 	}
 
-	renderLamp(16, a.Lamp14)
-	renderLamp(73, a.Lamp28)
-	renderLamp(130, a.LampSync)
-
-	if a.Reduction != nil {
-		b.WriteString(`<text x="100" y="110" text-anchor="middle" class="ann-subtitle muted">SPEND REDUCTION</text>`)
-		b.WriteString(`<rect x="18" y="118" width="78" height="58" rx="6" fill="var(--chart-bg,#fff)" stroke="var(--chart-axis,#c6ccd4)"/>`)
-		b.WriteString(`<rect x="104" y="118" width="78" height="58" rx="6" fill="var(--chart-bg,#fff)" stroke="var(--chart-axis,#c6ccd4)"/>`)
-		fmt.Fprintf(&b, `<text x="57" y="132" text-anchor="middle" class="ann-label muted">14-DAY</text><text x="57" y="154" text-anchor="middle" class="ann-value">%s</text><text x="57" y="168" text-anchor="middle" class="ann-label muted">PER DAY</text>`, esc(a.Reduction.Target14))
-		fmt.Fprintf(&b, `<text x="143" y="132" text-anchor="middle" class="ann-label muted">28-DAY</text><text x="143" y="154" text-anchor="middle" class="ann-value">%s</text><text x="143" y="168" text-anchor="middle" class="ann-label muted">PER DAY</text>`, esc(a.Reduction.Target28))
+	if faults > 0 {
+		b.WriteString(`<text x="100" y="168" text-anchor="middle" font-size="8" class="cas-status" style="fill:#e24b4a;letter-spacing:1.5px">CORRECTIVE ACTION</text>`)
+		fmt.Fprintf(&b, `<text x="100" y="182" text-anchor="middle" class="cas-faults" style="fill:#5a6270">%d FAULT`, faults)
+		if faults > 1 {
+			b.WriteString(`S`)
+		}
+		b.WriteString(` ACTIVE</text>`)
 	} else {
-		b.WriteString(`<text x="100" y="136" text-anchor="middle" class="ann-subtitle muted">ON GLIDESLOPE</text>`)
-		b.WriteString(`<text x="100" y="152" text-anchor="middle" class="ann-label muted">NO REDUCTION REQUIRED</text>`)
+		b.WriteString(`<text x="100" y="168" text-anchor="middle" font-size="8" class="cas-status" style="fill:#333a44;letter-spacing:1.5px">ON GLIDESLOPE</text>`)
+		b.WriteString(`<text x="100" y="182" text-anchor="middle" class="cas-faults" style="fill:#333a44">NO FAULTS</text>`)
 	}
 
 	b.WriteString(`</g></svg>`)
 	return b.String()
+}
+
+// casLamp renders a single CAS lamp at position (x, y) with size 80x52.
+// Dark when UNDER, amber-lit when WARN, red-lit when OVER.
+func casLamp(b *strings.Builder, x, y float64, l Lamp) {
+	const lampW, lampH = 80.0, 52.0
+
+	status := l.Value
+	if status == "" {
+		status = l.State.String()
+		if arrow := l.Trend.Arrow(); arrow != "" {
+			status += " " + arrow
+		}
+	}
+
+	switch l.State {
+	case LampOver:
+		fmt.Fprintf(b, `<rect x="%s" y="%s" width="%s" height="%s" rx="3" fill="#3a1c1c" stroke="#5a2a2a" stroke-width="1.5"/>`, f(x), f(y), f(lampW), f(lampH))
+		fmt.Fprintf(b, `<text x="%s" y="%s" text-anchor="middle" font-size="7" style="fill:#e24b4a;opacity:0.8;font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);letter-spacing:1.5px">%s</text>`, f(x+lampW/2), f(y+14), esc(l.Label))
+		fmt.Fprintf(b, `<text x="%s" y="%s" text-anchor="middle" font-size="15" style="fill:#e24b4a;font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-weight:700">%s</text>`, f(x+lampW/2), f(y+38), esc(status))
+	case LampWarn:
+		fmt.Fprintf(b, `<rect x="%s" y="%s" width="%s" height="%s" rx="3" fill="#362a10" stroke="#5a4520" stroke-width="1.5"/>`, f(x), f(y), f(lampW), f(lampH))
+		fmt.Fprintf(b, `<text x="%s" y="%s" text-anchor="middle" font-size="7" style="fill:#d99114;opacity:0.8;font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);letter-spacing:1.5px">%s</text>`, f(x+lampW/2), f(y+14), esc(l.Label))
+		fmt.Fprintf(b, `<text x="%s" y="%s" text-anchor="middle" font-size="15" style="fill:#d99114;font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-weight:700">%s</text>`, f(x+lampW/2), f(y+38), esc(status))
+	default:
+		fmt.Fprintf(b, `<rect x="%s" y="%s" width="%s" height="%s" rx="3" fill="#1a1e25" stroke="#262b33" stroke-width="1"/>`, f(x), f(y), f(lampW), f(lampH))
+		fmt.Fprintf(b, `<text x="%s" y="%s" text-anchor="middle" font-size="7" style="fill:#333a44;font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);letter-spacing:1.5px">%s</text>`, f(x+lampW/2), f(y+14), esc(l.Label))
+		fmt.Fprintf(b, `<text x="%s" y="%s" text-anchor="middle" font-size="15" style="fill:#333a44;font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-weight:700">%s</text>`, f(x+lampW/2), f(y+38), esc(status))
+	}
 }

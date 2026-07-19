@@ -17,15 +17,13 @@ templ DashboardPage(name string) {
                 @instrument("/gauge/asi", "asi · daily burn")
                 @instrument("/gauge/adi", "attitude · burn vs target")
                 @instrument("/gauge/fuel", "fuel · days of runway")
-                @instrument("/gauge/vsi", "vsi · spend rate trend")
+                @instrument("/gauge/vsi", "vsi · runway days delta")
                 @instrument("/gauge/cdi", "cdi · budget deviation")
                 @instrument("/gauge/dme", "dme · flight data")
-                @instrument("/gauge/annunciator", "annunciator · spend status")
+                @instrument("/gauge/annunciator", "cas · spend status")
+                @instrument("/gauge/corrective", "corrective · spend reduction")
                 @instrument("/gauge/totalizer", "totalizer · markers & total burn")
-            </div>
-            <div class="cockpit__strip">
-                <object type="image/svg+xml" data="/gauge/engines">engines</object>
-                <p class="placard">engine temps · current vs baseline burn, per category</p>
+                @instrument("/gauge/engines", "egt · category heat")
             </div>
         </div>
     }

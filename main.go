@@ -120,6 +120,7 @@ func run(ctx context.Context) error {
 	mux.Handle("GET /gauge/vsi", requireSession(handleGaugeVSI(store)))
 	mux.Handle("GET /gauge/adi", requireSession(handleGaugeADI(store)))
 	mux.Handle("GET /gauge/annunciator", requireSession(handleGaugeAnnunciator(store)))
+	mux.Handle("GET /gauge/corrective", requireSession(handleGaugeCorrective(store)))
 	mux.Handle("GET /gauge/fuel", requireSession(handleGaugeFuel(store)))
 	mux.Handle("GET /gauge/cdi", requireSession(handleGaugeCDI(store)))
 	mux.Handle("GET /gauge/dme", requireSession(handleGaugeDME(store)))

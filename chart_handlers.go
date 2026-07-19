@@ -278,20 +278,53 @@ func handleGaugeVSI(store *database.Store) http.HandlerFunc {
 		if err != nil {
 			return "", err
 		}
-		ema14s := make([]float64, 0, len(dailies))
-		for _, v := range dailies {
-			if v.Ema14 != nil {
-				ema14s = append(ema14s, *v.Ema14)
-			}
+		accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
+		if err != nil {
+			return "", err
 		}
-		if len(ema14s) < 2 {
-			return "", fmt.Errorf("insufficient ema14 history")
+		if !hasDepository(accounts) {
+			return charts.VSI(nil, 0), nil
 		}
 
-		deltas := make([]float64, 0, len(ema14s)-1)
-		for i := 1; i < len(ema14s); i++ {
-			// Metric is yesterday - today: positive means the spend rate is falling.
-			deltas = append(deltas, ema14s[i-1]-ema14s[i])
+		// VSI uses available depository cash only (not net of credit owed),
+		// so it reflects direct runway-day sensitivity to burn-rate changes.
+		cash, _ := cashOnHand(accounts)
+		if cash <= 0 {
+			return charts.VSI(nil, 0), nil
+		}
+
+		today := time.Now().Format(time.DateOnly)
+		runwayDays := make([]float64, 0, len(dailies))
+		for _, v := range dailies {
+			// Use only complete days; today's partial spend can swing EMA and
+			// produce an exaggerated intraday runway delta.
+			if v.Date < today && v.Ema14 != nil {
+				// Very small EMA14 values explode runway-days math and can
+				// dominate the gauge scale with unrealistic historical spikes.
+				if *v.Ema14 < 1 {
+					continue
+				}
+				days := runwayFuelDays(cash, *v.Ema14)
+				if !math.IsInf(days, 0) && !math.IsNaN(days) {
+					runwayDays = append(runwayDays, days)
+				}
+			}
+		}
+
+		// Keep the gauge adaptive to current behavior by using a recent window
+		// for scale fitting rather than the full historical tail.
+		const maxRunwaySamples = 45
+		if len(runwayDays) > maxRunwaySamples {
+			runwayDays = runwayDays[len(runwayDays)-maxRunwaySamples:]
+		}
+		if len(runwayDays) < 2 {
+			return "", fmt.Errorf("insufficient runway-day history")
+		}
+
+		deltas := make([]float64, 0, len(runwayDays)-1)
+		for i := 1; i < len(runwayDays); i++ {
+			// Positive means runway days are increasing (improving).
+			deltas = append(deltas, runwayDays[i]-runwayDays[i-1])
 		}
 		if len(deltas) == 0 {
 			return "", fmt.Errorf("insufficient delta history")
@@ -340,16 +373,58 @@ func handleGaugeAnnunciator(store *database.Store) http.HandlerFunc {
 		targetDaily := s.Target
 		daysLeft := 0
 		remainingBudget := 0.0
+		fuelLow := false
 		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
 			daysLeft = max(daysInMonth(now)-now.Day()+1, 1)
 			remainingBudget = max(*userRow.DiscretionaryMonthly-burnMTD, 0)
 			if targetDaily <= 0 {
 				targetDaily = *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
 			}
+			if daysLeft > 0 && remainingBudget/float64(daysLeft) < s.E14*0.5 {
+				fuelLow = true
+			}
+			if remainingBudget <= 0 {
+				fuelLow = true
+			}
 		}
 
-		state := charts.ComputeAnnunciator(targetDaily, s.E14, s.E28, s.PrevE14, s.PrevE28, daysLeft, remainingBudget, syncFresh(accounts))
+		state := charts.ComputeAnnunciator(targetDaily, s.E14, s.E28, s.PrevE14, s.PrevE28, daysLeft, remainingBudget, syncFresh(accounts), fuelLow)
 		return charts.AnnunciatorSVG(state), nil
+	})
+}
+
+func handleGaugeCorrective(store *database.Store) http.HandlerFunc {
+	return chartHandler(func(r *http.Request, userID string) (string, error) {
+		dailies, err := loadDailies(r.Context(), store, userID)
+		if err != nil {
+			return "", err
+		}
+		userRow, err := store.GetUserByID(r.Context(), userID)
+		if err != nil {
+			return "", err
+		}
+		s, err := snapshotEMAs(dailies, "corrective")
+		if err != nil {
+			return "", err
+		}
+
+		now := time.Now()
+		state := charts.CorrectiveState{}
+
+		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
+			burnMTD := monthToDateSpend(dailies, now)
+			daysLeft := max(daysInMonth(now)-now.Day()+1, 1)
+			remainingBudget := max(*userRow.DiscretionaryMonthly-burnMTD, 0)
+			adjustedDaily := remainingBudget / float64(daysLeft)
+
+			state.Reduction = math.Max(s.E14-adjustedDaily, 0)
+			state.MaxScale = *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
+			if state.MaxScale < state.Reduction*1.2 {
+				state.MaxScale = state.Reduction * 1.5
+			}
+		}
+
+		return charts.CorrectiveSVG(state), nil
 	})
 }
 
