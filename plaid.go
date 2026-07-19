@@ -215,6 +215,7 @@ func adoptParams(p sqlcgen.UpsertTransactionParams, pendingPlaidID string) sqlcg
 		CategoryDetailed:   p.CategoryDetailed,
 		CategoryConfidence: p.CategoryConfidence,
 		PaymentChannel:     p.PaymentChannel,
+		LogoUrl:            p.LogoUrl,
 		RawJson:            p.RawJson,
 		PendingPlaidID:     pendingPlaidID,
 	}
@@ -243,6 +244,7 @@ func matchAdoptParams(p sqlcgen.UpsertTransactionParams) sqlcgen.AdoptSettledTra
 		CategoryDetailed:   p.CategoryDetailed,
 		CategoryConfidence: p.CategoryConfidence,
 		PaymentChannel:     p.PaymentChannel,
+		LogoUrl:            p.LogoUrl,
 		RawJson:            p.RawJson,
 		AccountID:          p.AccountID,
 		EffectiveDate:      effectiveDate(p),
@@ -273,8 +275,28 @@ func transactionParams(tx plaid.Transaction, cfg *Config, notified int64) (sqlcg
 		PaymentChannel:     tx.GetPaymentChannel(),
 		Pending:            pending,
 		Notified:           notified,
+		LogoUrl:            transactionLogoURL(tx),
 		RawJson:            encryptedRawJSON(tx, tx.GetTransactionId(), cfg.DBCryptKey),
 	}, nil
+}
+
+// transactionLogoURL picks the best icon Plaid offers for a transaction:
+// the merchant logo, else the first counterparty's logo (slightly better
+// coverage), else the generic category icon that every enriched transaction
+// carries. Nil only when Plaid sent nothing at all.
+func transactionLogoURL(tx plaid.Transaction) *string {
+	if u := tx.LogoUrl.Get(); u != nil && *u != "" {
+		return u
+	}
+	for _, c := range tx.GetCounterparties() {
+		if u := c.LogoUrl.Get(); u != nil && *u != "" {
+			return u
+		}
+	}
+	if u := tx.GetPersonalFinanceCategoryIconUrl(); u != "" {
+		return &u
+	}
+	return nil
 }
 
 func syncAllAccounts(ctx context.Context, itemID string, accessToken string, plaidClient *plaid.APIClient, store *database.Store, cfg *Config) error {

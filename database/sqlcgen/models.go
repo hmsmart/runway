@@ -66,6 +66,7 @@ type Transaction struct {
 	TgMessageID        *int64  `json:"tg_message_id"`
 	MessageStale       int64   `json:"message_stale"`
 	MergeCandidateTxID *string `json:"merge_candidate_tx_id"`
+	LogoUrl            *string `json:"logo_url"`
 }
 
 type User struct {

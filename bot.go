@@ -1159,6 +1159,7 @@ func (t *TelegramBot) handleMerge(ctx context.Context, b *bot.Bot, update *model
 			CategoryDetailed:   settled.CategoryDetailed,
 			CategoryConfidence: settled.CategoryConfidence,
 			PaymentChannel:     settled.PaymentChannel,
+			LogoUrl:            settled.LogoUrl,
 			RawJson:            settled.RawJson,
 			PendingTxID:        pending.TxID,
 		})

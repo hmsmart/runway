@@ -2,9 +2,9 @@
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, authorized_date, amount,
     name, merchant_name, category_primary, category_detailed, category_confidence,
-    payment_channel, pending, raw_json, notified, merge_candidate_tx_id
+    payment_channel, pending, raw_json, notified, merge_candidate_tx_id, logo_url
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     -- Plaid's authorized date wins when present, but a null must not clobber
@@ -21,8 +21,10 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     pending = excluded.pending,
     removed_at = NULL,
     raw_json = excluded.raw_json,
-    -- A replay must not wipe an offer the user hasn't acted on.
-    merge_candidate_tx_id = COALESCE(excluded.merge_candidate_tx_id, merge_candidate_tx_id)
+    -- A replay must not wipe an offer the user hasn't acted on, and a resend
+    -- without enrichment must not wipe a logo we already have.
+    merge_candidate_tx_id = COALESCE(excluded.merge_candidate_tx_id, merge_candidate_tx_id),
+    logo_url = COALESCE(excluded.logo_url, logo_url)
 RETURNING tx_id;
 
 -- name: AdoptPendingTransaction :execresult
@@ -50,6 +52,7 @@ UPDATE transactions SET
     pending = 0,
     removed_at = NULL,
     message_stale = 1,
+    logo_url = COALESCE(sqlc.arg(logo_url), logo_url),
     raw_json = sqlc.arg(raw_json)
 WHERE transactions.plaid_tx_id = sqlc.arg(pending_plaid_id)
   AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = sqlc.arg(posted_plaid_id));
@@ -81,6 +84,7 @@ UPDATE transactions SET
     pending = 0,
     removed_at = NULL,
     message_stale = 1,
+    logo_url = COALESCE(sqlc.arg(logo_url), logo_url),
     raw_json = sqlc.arg(raw_json)
 WHERE transactions.tx_id = (
     SELECT p.tx_id FROM transactions p
@@ -165,6 +169,7 @@ UPDATE transactions SET
     pending = 0,
     removed_at = NULL,
     message_stale = 1,
+    logo_url = COALESCE(sqlc.arg(logo_url), logo_url),
     raw_json = sqlc.arg(raw_json)
 WHERE transactions.tx_id = sqlc.arg(pending_tx_id)
   AND transactions.pending = 1
@@ -251,7 +256,8 @@ SELECT
     t.amount,
     t.excluded,
     t.date AS raw_date,
-    t.amort_end
+    t.amort_end,
+    t.logo_url
 FROM transactions t
 JOIN accounts a ON a.account_id = t.account_id
 JOIN items i ON i.item_id = a.item_id

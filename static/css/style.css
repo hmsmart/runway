@@ -66,6 +66,38 @@ tr.spread td.date::after {
   font-style: italic;
 }
 
+/* A table wider than a phone screen scrolls inside its wrapper instead of
+ * dragging the whole page sideways. */
+figure.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Pico's 16px cell gutters spend 128px of a phone's width on air; tighter
+ * gutters let all four columns fit without scrolling. The nav gets the same
+ * treatment: five links plus the avatar overflow a phone at Pico's default
+ * link padding, dragging the page sideways. */
+@media (max-width: 576px) {
+  tbody td, thead th {
+    padding-inline: 0.375rem;
+  }
+  body > header nav {
+    font-size: 0.9375rem;
+    flex-wrap: wrap;
+  }
+  body > header nav li {
+    padding-inline: 0.25rem;
+  }
+}
+
+td.descr .merchant-logo {
+  width: 1.25em;
+  height: 1.25em;
+  border-radius: 50%;
+  vertical-align: text-bottom;
+  margin-right: 0.4em;
+}
+
 
 /* ---------------------------------------------------------------------------
  * Chart theme

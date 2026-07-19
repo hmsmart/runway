@@ -91,7 +91,8 @@ func TestMagicLinkSession(t *testing.T) {
 	req.AddCookie(cookies[0])
 	rec = httptest.NewRecorder()
 	gated.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "welcome back, Test") {
+	// The dashboard lowercases the greeting as a style choice.
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "welcome back, test") {
 		t.Fatalf("want dashboard greeting, got %d: %.200s", rec.Code, rec.Body.String())
 	}
 

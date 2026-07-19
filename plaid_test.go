@@ -452,6 +452,29 @@ func TestExcludedCardRendersStruckThrough(t *testing.T) {
 	}
 }
 
+// TestTransactionLogoURL walks the fallback chain: merchant logo, then first
+// counterparty logo, then the generic category icon, then nothing.
+func TestTransactionLogoURL(t *testing.T) {
+	tx := plaid.Transaction{}
+	if got := transactionLogoURL(tx); got != nil {
+		t.Errorf("bare transaction should have no logo, got %q", *got)
+	}
+	tx.SetPersonalFinanceCategoryIconUrl("https://plaid.com/icons/food.png")
+	if got := transactionLogoURL(tx); got == nil || *got != "https://plaid.com/icons/food.png" {
+		t.Errorf("want category icon fallback, got %v", got)
+	}
+	cp := plaid.TransactionCounterparty{}
+	cp.SetLogoUrl("https://plaid.com/cp.png")
+	tx.SetCounterparties([]plaid.TransactionCounterparty{cp})
+	if got := transactionLogoURL(tx); got == nil || *got != "https://plaid.com/cp.png" {
+		t.Errorf("want counterparty logo over category icon, got %v", got)
+	}
+	tx.SetLogoUrl("https://plaid.com/merchant.png")
+	if got := transactionLogoURL(tx); got == nil || *got != "https://plaid.com/merchant.png" {
+		t.Errorf("want merchant logo first, got %v", got)
+	}
+}
+
 func countTransactions(t *testing.T, store *database.Store) int {
 	t.Helper()
 	rows, err := store.ListTransactionsByUser(context.Background(), "u1")

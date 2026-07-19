@@ -25,8 +25,9 @@ UPDATE transactions SET
     pending = 0,
     removed_at = NULL,
     message_stale = 1,
-    raw_json = ?11
-WHERE transactions.plaid_tx_id = ?12
+    logo_url = COALESCE(?11, logo_url),
+    raw_json = ?12
+WHERE transactions.plaid_tx_id = ?13
   AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
 `
 
@@ -41,6 +42,7 @@ type AdoptPendingTransactionParams struct {
 	CategoryDetailed   string  `json:"category_detailed"`
 	CategoryConfidence *string `json:"category_confidence"`
 	PaymentChannel     string  `json:"payment_channel"`
+	LogoUrl            *string `json:"logo_url"`
 	RawJson            *string `json:"raw_json"`
 	PendingPlaidID     string  `json:"pending_plaid_id"`
 }
@@ -67,6 +69,7 @@ func (q *Queries) AdoptPendingTransaction(ctx context.Context, arg AdoptPendingT
 		arg.CategoryDetailed,
 		arg.CategoryConfidence,
 		arg.PaymentChannel,
+		arg.LogoUrl,
 		arg.RawJson,
 		arg.PendingPlaidID,
 	)
@@ -87,15 +90,16 @@ UPDATE transactions SET
     pending = 0,
     removed_at = NULL,
     message_stale = 1,
-    raw_json = ?11
+    logo_url = COALESCE(?11, logo_url),
+    raw_json = ?12
 WHERE transactions.tx_id = (
     SELECT p.tx_id FROM transactions p
     WHERE p.pending = 1
-      AND p.account_id = ?12
+      AND p.account_id = ?13
       AND p.amount = ?4
       AND COALESCE(p.authorized_date, p.date)
-          BETWEEN date(CAST(?13 AS TEXT), '-7 days')
-              AND CAST(?13 AS TEXT)
+          BETWEEN date(CAST(?14 AS TEXT), '-7 days')
+              AND CAST(?14 AS TEXT)
     ORDER BY COALESCE(p.authorized_date, p.date) DESC, p.tx_id ASC
     LIMIT 1
 )
@@ -113,6 +117,7 @@ type AdoptSettledTransactionByMatchParams struct {
 	CategoryDetailed   string  `json:"category_detailed"`
 	CategoryConfidence *string `json:"category_confidence"`
 	PaymentChannel     string  `json:"payment_channel"`
+	LogoUrl            *string `json:"logo_url"`
 	RawJson            *string `json:"raw_json"`
 	AccountID          string  `json:"account_id"`
 	EffectiveDate      string  `json:"effective_date"`
@@ -142,6 +147,7 @@ func (q *Queries) AdoptSettledTransactionByMatch(ctx context.Context, arg AdoptS
 		arg.CategoryDetailed,
 		arg.CategoryConfidence,
 		arg.PaymentChannel,
+		arg.LogoUrl,
 		arg.RawJson,
 		arg.AccountID,
 		arg.EffectiveDate,
@@ -273,7 +279,7 @@ func (q *Queries) FindTipRangeCandidate(ctx context.Context, arg FindTipRangeCan
 }
 
 const getPendingNotifications = `-- name: GetPendingNotifications :many
-SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale, transactions.merge_candidate_tx_id FROM transactions
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale, transactions.merge_candidate_tx_id, transactions.logo_url FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
@@ -317,6 +323,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 			&i.Transaction.TgMessageID,
 			&i.Transaction.MessageStale,
 			&i.Transaction.MergeCandidateTxID,
+			&i.Transaction.LogoUrl,
 		); err != nil {
 			return nil, err
 		}
@@ -332,7 +339,7 @@ func (q *Queries) GetPendingNotifications(ctx context.Context, tgID *int64) ([]G
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date, tg_message_id, message_stale, merge_candidate_tx_id FROM transactions WHERE tx_id = ?
+SELECT tx_id, plaid_tx_id, account_id, date, amount, name, merchant_name, category_primary, category_detailed, category_confidence, payment_channel, pending, removed_at, amort_end, excluded, raw_json, notified, authorized_date, tg_message_id, message_stale, merge_candidate_tx_id, logo_url FROM transactions WHERE tx_id = ?
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction, error) {
@@ -360,6 +367,7 @@ func (q *Queries) GetTransaction(ctx context.Context, txID string) (Transaction,
 		&i.TgMessageID,
 		&i.MessageStale,
 		&i.MergeCandidateTxID,
+		&i.LogoUrl,
 	)
 	return i, err
 }
@@ -396,7 +404,7 @@ func (q *Queries) ListChatsWithPendingNotifications(ctx context.Context) ([]*int
 }
 
 const listStaleMessages = `-- name: ListStaleMessages :many
-SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale, transactions.merge_candidate_tx_id FROM transactions
+SELECT transactions.tx_id, transactions.plaid_tx_id, transactions.account_id, transactions.date, transactions.amount, transactions.name, transactions.merchant_name, transactions.category_primary, transactions.category_detailed, transactions.category_confidence, transactions.payment_channel, transactions.pending, transactions.removed_at, transactions.amort_end, transactions.excluded, transactions.raw_json, transactions.notified, transactions.authorized_date, transactions.tg_message_id, transactions.message_stale, transactions.merge_candidate_tx_id, transactions.logo_url FROM transactions
 JOIN accounts ON accounts.account_id = transactions.account_id
 JOIN items ON items.item_id = accounts.item_id
 JOIN users ON users.id = items.user_id
@@ -444,6 +452,7 @@ func (q *Queries) ListStaleMessages(ctx context.Context, tgID *int64) ([]ListSta
 			&i.Transaction.TgMessageID,
 			&i.Transaction.MessageStale,
 			&i.Transaction.MergeCandidateTxID,
+			&i.Transaction.LogoUrl,
 		); err != nil {
 			return nil, err
 		}
@@ -467,7 +476,8 @@ SELECT
     t.amount,
     t.excluded,
     t.date AS raw_date,
-    t.amort_end
+    t.amort_end,
+    t.logo_url
 FROM transactions t
 JOIN accounts a ON a.account_id = t.account_id
 JOIN items i ON i.item_id = a.item_id
@@ -486,6 +496,7 @@ type ListTransactionsByUserRow struct {
 	Excluded    int64   `json:"excluded"`
 	RawDate     string  `json:"raw_date"`
 	AmortEnd    *string `json:"amort_end"`
+	LogoUrl     *string `json:"logo_url"`
 }
 
 // Feeds the /transactions table. Unlike ListSpendTransactionsByUser this
@@ -509,6 +520,7 @@ func (q *Queries) ListTransactionsByUser(ctx context.Context, userID string) ([]
 			&i.Excluded,
 			&i.RawDate,
 			&i.AmortEnd,
+			&i.LogoUrl,
 		); err != nil {
 			return nil, err
 		}
@@ -572,8 +584,9 @@ UPDATE transactions SET
     pending = 0,
     removed_at = NULL,
     message_stale = 1,
-    raw_json = ?11
-WHERE transactions.tx_id = ?12
+    logo_url = COALESCE(?11, logo_url),
+    raw_json = ?12
+WHERE transactions.tx_id = ?13
   AND transactions.pending = 1
   AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
 `
@@ -589,6 +602,7 @@ type MergeSettledIntoPendingParams struct {
 	CategoryDetailed   string  `json:"category_detailed"`
 	CategoryConfidence *string `json:"category_confidence"`
 	PaymentChannel     string  `json:"payment_channel"`
+	LogoUrl            *string `json:"logo_url"`
 	RawJson            *string `json:"raw_json"`
 	PendingTxID        string  `json:"pending_tx_id"`
 }
@@ -611,6 +625,7 @@ func (q *Queries) MergeSettledIntoPending(ctx context.Context, arg MergeSettledI
 		arg.CategoryDetailed,
 		arg.CategoryConfidence,
 		arg.PaymentChannel,
+		arg.LogoUrl,
 		arg.RawJson,
 		arg.PendingTxID,
 	)
@@ -661,9 +676,9 @@ const upsertTransaction = `-- name: UpsertTransaction :one
 INSERT INTO transactions (
     tx_id, plaid_tx_id, account_id, date, authorized_date, amount,
     name, merchant_name, category_primary, category_detailed, category_confidence,
-    payment_channel, pending, raw_json, notified, merge_candidate_tx_id
+    payment_channel, pending, raw_json, notified, merge_candidate_tx_id, logo_url
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plaid_tx_id) DO UPDATE SET
     date = excluded.date,
     -- Plaid's authorized date wins when present, but a null must not clobber
@@ -680,8 +695,10 @@ ON CONFLICT(plaid_tx_id) DO UPDATE SET
     pending = excluded.pending,
     removed_at = NULL,
     raw_json = excluded.raw_json,
-    -- A replay must not wipe an offer the user hasn't acted on.
-    merge_candidate_tx_id = COALESCE(excluded.merge_candidate_tx_id, merge_candidate_tx_id)
+    -- A replay must not wipe an offer the user hasn't acted on, and a resend
+    -- without enrichment must not wipe a logo we already have.
+    merge_candidate_tx_id = COALESCE(excluded.merge_candidate_tx_id, merge_candidate_tx_id),
+    logo_url = COALESCE(excluded.logo_url, logo_url)
 RETURNING tx_id
 `
 
@@ -702,6 +719,7 @@ type UpsertTransactionParams struct {
 	RawJson            *string `json:"raw_json"`
 	Notified           int64   `json:"notified"`
 	MergeCandidateTxID *string `json:"merge_candidate_tx_id"`
+	LogoUrl            *string `json:"logo_url"`
 }
 
 func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionParams) (string, error) {
@@ -722,6 +740,7 @@ func (q *Queries) UpsertTransaction(ctx context.Context, arg UpsertTransactionPa
 		arg.RawJson,
 		arg.Notified,
 		arg.MergeCandidateTxID,
+		arg.LogoUrl,
 	)
 	var tx_id string
 	err := row.Scan(&tx_id)

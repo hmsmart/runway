@@ -13,6 +13,7 @@ templ TransactionPage(name string, transList []domains.TransactionRow) {
             <h1>welcome back, { strings.ToLower(name) }</h1>
             <p>your transactions</p>
         </hgroup>
+        <figure class="table-scroll">
         <table>
             <thead>
                 <tr>
@@ -27,12 +28,18 @@ templ TransactionPage(name string, transList []domains.TransactionRow) {
                     <tr class={ rowClass(tx) }>
                         <td class="date" data-spread={ tx.Spread() }>{ tx.Date() }</td>
                         <td>{ strings.ToLower(tx.Account()) }</td>
-                        <td>{ strings.ToLower(tx.Description()) }</td>
+                        <td class="descr">
+                            if tx.Logo() != "" {
+                                <img class="merchant-logo" src={ tx.Logo() } alt="" loading="lazy" referrerpolicy="no-referrer"/>
+                            }
+                            { strings.ToLower(tx.Description()) }
+                        </td>
                         <td>{ formatAmount(tx.Amount()) }</td>
                     </tr>
                 }
             </tbody>
         </table>
+        </figure>
     }
 }
 

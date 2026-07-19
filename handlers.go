@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 
@@ -19,11 +18,16 @@ import (
 // clientIP is for logging only. X-Real-Ip is trusted as set by the reverse
 // proxy in front of this service; never use this value for authorization.
 func clientIP(r *http.Request) string {
+	cfConIP := r.Header.Get("CF-Connecting-IP")
+	if cfConIP != "" {
+		return cfConIP
+	}
 	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
 		return xri
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
+	ips := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	clientIP := strings.TrimSpace(ips[0])
+	return clientIP
 }
 
 func handleHealthz(store *database.Store) http.HandlerFunc {
@@ -274,7 +278,7 @@ func handleTransactions(store *database.Store) http.HandlerFunc {
 		for _, row := range rows {
 			transList = append(transList, domains.NewTransactionRow(
 				row.Date, row.AccountName, row.Description, row.Amount,
-				row.Excluded != 0, row.RawDate, row.AmortEnd,
+				row.Excluded != 0, row.RawDate, row.AmortEnd, row.LogoUrl,
 			))
 		}
 		if err := templates.TransactionPage(user.FirstName(), transList).Render(r.Context(), w); err != nil {
