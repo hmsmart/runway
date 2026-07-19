@@ -14,9 +14,15 @@ import (
 	"fmt"
 	"html"
 	"math"
+	"slices"
 	"strings"
 	"time"
 )
+
+// StyleHref is the site stylesheet URL, cache-buster included. The layout's
+// <link> and every SVG's @import go through this one constant so a style
+// change busts both caches together.
+const StyleHref = "/assets/css/style.css?v=14"
 
 // Day is one row of the daily-spend series. EMA pointers are nil only for
 // legacy rows that predate a smoothing column; renderers skip those points.
@@ -145,7 +151,11 @@ func catColorRule(name string) string {
 // tooltip popping over the chart on hover.
 func svgOpen(b *strings.Builder, w, h int, title string, extraCSS string) {
 	fmt.Fprintf(b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" role="img" aria-label="%s">`, w, h, esc(title))
-	b.WriteString("<style>@import url('/assets/css/style.css');")
+	b.WriteString("<style>@import url('" + StyleHref + "');")
+	// Embedded documents must declare the same color-scheme range as the
+	// page: a mismatch makes the browser paint an opaque (white) canvas
+	// behind the SVG instead of keeping it transparent.
+	b.WriteString(":root{color-scheme:light dark}")
 	b.WriteString("text{font-family:var(--chart-font,system-ui,-apple-system,'Segoe UI',sans-serif);fill:var(--chart-ink,#33383f)}")
 	b.WriteString(".muted{fill:var(--chart-muted,#6a7280)}")
 	b.WriteString(".grid{stroke:var(--chart-grid,#e3e6ea);stroke-width:1}")
@@ -199,7 +209,8 @@ func comma(s string) string {
 		out.WriteString(intPart[i : i+3])
 	}
 	if frac != "" {
-		out.WriteString("." + frac)
+		out.WriteString(".")
+		out.WriteString(frac)
 	}
 	return out.String()
 }
@@ -232,4 +243,35 @@ func dayLabel(date string) string {
 		return date
 	}
 	return strings.ToLower(t.Format("Mon Jan 2"))
+}
+
+func percentileInc(dataset []float64, percentile float64) (float64, error) {
+	if len(dataset) == 0 {
+		return 0, fmt.Errorf("cannot calculate percentile for empty set")
+	}
+	if percentile < 0 || percentile > 100 {
+		return 0, fmt.Errorf("percentile must be between 0 and 100")
+	}
+	absSet := make([]float64, len(dataset))
+	for i, v := range dataset {
+		absSet[i] = math.Abs(v)
+	}
+	slices.Sort(absSet)
+	if percentile == 0 {
+		return absSet[0], nil
+	}
+	if percentile == 100 {
+		return absSet[len(absSet)-1], nil
+	}
+	n := float64(len(absSet))
+	h := 1 + (percentile/100.0)*(n-1)
+	lo := int(math.Floor(h)) - 1
+	frac := h - math.Floor(h)
+	if lo < 0 {
+		return absSet[0], nil
+	}
+	if lo >= len(absSet)-1 {
+		return absSet[len(absSet)-1], nil
+	}
+	return absSet[lo] + frac*(absSet[lo+1]-absSet[lo]), nil
 }

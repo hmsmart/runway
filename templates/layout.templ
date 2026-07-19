@@ -1,7 +1,10 @@
 // layout.templ
 package templates
 
-import "github.com/hmsmart/runway/domains"
+import (
+    "github.com/hmsmart/runway/charts"
+    "github.com/hmsmart/runway/domains"
+)
 
 templ Layout(title string) {
     <!DOCTYPE html>
@@ -12,10 +15,7 @@ templ Layout(title string) {
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <meta name="color-scheme" content="light dark">
             <link rel="stylesheet" href="/assets/css/pico.classless.slate.min.css">
-            <link rel="stylesheet" href="/assets/css/style.css?v=8">
-            <style>
-                @import url('https://fonts.googleapis.com/css2?family=Iosevka+Charon+Mono:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap');
-            </style>
+            <link rel="stylesheet" href={ charts.StyleHref }>
         </head>
         <body>
             <header>

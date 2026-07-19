@@ -259,20 +259,7 @@ func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *mode
 // balances owed: cards are spend that hasn't left checking yet, so ignoring
 // them would overstate the runway.
 func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, budget *float64, committed, todaySpend float64, spendLabel string, now time.Time) string {
-	var cash, owed float64
-	for _, a := range accounts {
-		if a.Type != nil && *a.Type == "credit" {
-			if a.BalanceCurrent != nil {
-				owed += *a.BalanceCurrent
-			}
-			continue
-		}
-		if a.BalanceAvailable != nil {
-			cash += *a.BalanceAvailable
-		} else if a.BalanceCurrent != nil {
-			cash += *a.BalanceCurrent
-		}
-	}
+	cash, owed := cashOnHand(accounts)
 	net := cash - owed
 	netStr := formatDollarsCents(net)
 	if net < 0 {
@@ -353,6 +340,28 @@ func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, bud
 	}
 	sb.WriteString("</pre>")
 	return sb.String()
+}
+
+// cashOnHand splits tracked accounts into spendable cash (depository
+// balances, available preferred since that's what's actually spendable) and
+// credit-card balances owed. Cards are spend that hasn't left checking yet,
+// so runway math uses cash minus owed. Shared by the /runway report and the
+// fuel/DME gauges.
+func cashOnHand(accounts []sqlcgen.Account) (cash, owed float64) {
+	for _, a := range accounts {
+		if a.Type != nil && *a.Type == "credit" {
+			if a.BalanceCurrent != nil {
+				owed += *a.BalanceCurrent
+			}
+			continue
+		}
+		if a.BalanceAvailable != nil {
+			cash += *a.BalanceAvailable
+		} else if a.BalanceCurrent != nil {
+			cash += *a.BalanceCurrent
+		}
+	}
+	return cash, owed
 }
 
 // trendIndicator marks how a spend figure sits against a longer-horizon

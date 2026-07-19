@@ -8,15 +8,32 @@ templ DashboardPage(name string) {
             <h1>welcome back, { strings.ToLower(name) }</h1>
             <p>your runway at a glance</p>
         </hgroup>
-        // Charts are standalone SVG documents; <object> (not <img>) lets each
-        // one load the site stylesheet, so they follow the theme and its
-        // light/dark scheme. See the chart-theme block in style.css.
-        <div class="charts">
-            <div class="wide"><object type="image/svg+xml" data="/charts/heatmap" class="heatmap">heatmap</object></div>
-            <div class="square"><object type="image/svg+xml" data="/charts/category/donut">donut</object></div>
-            <div class="wide"><object type="image/svg+xml" data="/charts/trend">trend</object></div>
-            <div class="square"><object type="image/svg+xml" data="/charts/category/bars">category bars</object></div>
-            <div class="square"><object type="image/svg+xml" data="/charts/category/radar">radar</object></div>
+        // The cockpit: each instrument is a standalone SVG document; <object>
+        // (not <img>) lets each one load the site stylesheet, so they follow
+        // the theme and its light/dark scheme. See the chart-theme block in
+        // style.css.
+        <div class="cockpit">
+            <div class="cockpit__grid">
+                @instrument("/gauge/asi", "asi · daily burn")
+                @instrument("/gauge/adi", "attitude · burn vs target")
+                @instrument("/gauge/fuel", "fuel · days of runway")
+                @instrument("/gauge/vsi", "vsi · spend rate trend")
+                @instrument("/gauge/cdi", "cdi · budget deviation")
+                @instrument("/gauge/dme", "dme · flight data")
+                @instrument("/gauge/annunciator", "annunciator · spend status")
+                @instrument("/gauge/totalizer", "totalizer · markers & total burn")
+            </div>
+            <div class="cockpit__strip">
+                <object type="image/svg+xml" data="/gauge/engines">engines</object>
+                <p class="placard">engine temps · current vs baseline burn, per category</p>
+            </div>
         </div>
     }
+}
+
+templ instrument(src, placard string) {
+    <div class="instrument">
+        <object type="image/svg+xml" data={ src }>{ placard }</object>
+        <p class="placard">{ placard }</p>
+    </div>
 }
