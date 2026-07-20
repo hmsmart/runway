@@ -10,6 +10,85 @@ import (
 	"database/sql"
 )
 
+const adoptHoldByAmount = `-- name: AdoptHoldByAmount :execresult
+UPDATE transactions SET
+    plaid_tx_id = ?1,
+    account_id = ?2,
+    date = ?3,
+    authorized_date = COALESCE(?4, authorized_date, date),
+    amount = ?5,
+    name = ?6,
+    merchant_name = ?7,
+    category_primary = ?8,
+    category_detailed = ?9,
+    category_confidence = ?10,
+    payment_channel = ?11,
+    pending = 0,
+    removed_at = NULL,
+    message_stale = 1,
+    logo_url = COALESCE(?12, logo_url),
+    raw_json = ?13
+WHERE transactions.tx_id = (
+    SELECT h.tx_id FROM transactions h
+    JOIN accounts a ON a.account_id = h.account_id
+    JOIN items i ON i.item_id = a.item_id
+    WHERE h.plaid_tx_id LIKE 'hold:%'
+      AND h.pending = 1
+      AND h.removed_at IS NULL
+      AND i.user_id = ?14
+      AND h.amount = ?5
+      AND COALESCE(h.authorized_date, h.date)
+          BETWEEN date(CAST(?15 AS TEXT), '-7 days')
+              AND CAST(?15 AS TEXT)
+    ORDER BY COALESCE(h.authorized_date, h.date) DESC, h.tx_id ASC
+    LIMIT 1
+)
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = ?1)
+`
+
+type AdoptHoldByAmountParams struct {
+	PostedPlaidID      string  `json:"posted_plaid_id"`
+	AccountID          string  `json:"account_id"`
+	Date               string  `json:"date"`
+	AuthorizedDate     *string `json:"authorized_date"`
+	Amount             float64 `json:"amount"`
+	Name               string  `json:"name"`
+	MerchantName       *string `json:"merchant_name"`
+	CategoryPrimary    string  `json:"category_primary"`
+	CategoryDetailed   string  `json:"category_detailed"`
+	CategoryConfidence *string `json:"category_confidence"`
+	PaymentChannel     string  `json:"payment_channel"`
+	LogoUrl            *string `json:"logo_url"`
+	RawJson            *string `json:"raw_json"`
+	UserID             string  `json:"user_id"`
+	EffectiveDate      string  `json:"effective_date"`
+}
+
+// When a Plaid transaction arrives and no pending adoption or tip-range
+// candidate matched, try to claim a hold row created by the iOS webhook.
+// Holds live on the manual account, so matching is cross-account: same user
+// (via items), same amount, swipe date within the settlement window. The
+// adopted row moves to the real account and inherits all Plaid metadata.
+func (q *Queries) AdoptHoldByAmount(ctx context.Context, arg AdoptHoldByAmountParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, adoptHoldByAmount,
+		arg.PostedPlaidID,
+		arg.AccountID,
+		arg.Date,
+		arg.AuthorizedDate,
+		arg.Amount,
+		arg.Name,
+		arg.MerchantName,
+		arg.CategoryPrimary,
+		arg.CategoryDetailed,
+		arg.CategoryConfidence,
+		arg.PaymentChannel,
+		arg.LogoUrl,
+		arg.RawJson,
+		arg.UserID,
+		arg.EffectiveDate,
+	)
+}
+
 const adoptPendingTransaction = `-- name: AdoptPendingTransaction :execresult
 UPDATE transactions SET
     plaid_tx_id = ?1,
@@ -242,6 +321,23 @@ DELETE FROM transactions WHERE account_id IN (SELECT account_id FROM accounts WH
 
 func (q *Queries) DeleteTransactionsByItem(ctx context.Context, itemID string) error {
 	_, err := q.db.ExecContext(ctx, deleteTransactionsByItem, itemID)
+	return err
+}
+
+const expireStaleHolds = `-- name: ExpireStaleHolds :exec
+UPDATE transactions SET removed_at = datetime('now'), message_stale = 1
+WHERE plaid_tx_id LIKE 'hold:%'
+  AND pending = 1
+  AND removed_at IS NULL
+  AND COALESCE(authorized_date, date) < date('now', '-2 days')
+`
+
+// Soft-delete hold transactions older than 2 days that never matched a
+// Plaid transaction. Sets message_stale so the drain worker strikes through
+// the card and adds a thumbs-down reaction, same as a preauth that fell off.
+// Date columns are YYYY-MM-DD text, so 2 days is the closest we get to 48h.
+func (q *Queries) ExpireStaleHolds(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, expireStaleHolds)
 	return err
 }
 

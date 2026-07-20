@@ -81,4 +81,5 @@ type User struct {
 	DiscretionaryMonthly *float64  `json:"discretionary_monthly"`
 	ReportTime           *string   `json:"report_time"`
 	ReportSentOn         *string   `json:"report_sent_on"`
+	ApiKey               *string   `json:"api_key"`
 }

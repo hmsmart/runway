@@ -45,8 +45,32 @@ func (q *Queries) DeleteUser(ctx context.Context, id string) error {
 	return err
 }
 
+const getUserByAPIKey = `-- name: GetUserByAPIKey :one
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key FROM users WHERE api_key = ? AND active = 1
+`
+
+func (q *Queries) GetUserByAPIKey(ctx context.Context, apiKey *string) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByAPIKey, apiKey)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.TgID,
+		&i.TgUsername,
+		&i.TgFirstName,
+		&i.InviteCode,
+		&i.CanInvite,
+		&i.Active,
+		&i.CreatedAt,
+		&i.DiscretionaryMonthly,
+		&i.ReportTime,
+		&i.ReportSentOn,
+		&i.ApiKey,
+	)
+	return i, err
+}
+
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on FROM users WHERE id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key FROM users WHERE id = ? and active = 1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -64,12 +88,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.DiscretionaryMonthly,
 		&i.ReportTime,
 		&i.ReportSentOn,
+		&i.ApiKey,
 	)
 	return i, err
 }
 
 const getUserByTelegram = `-- name: GetUserByTelegram :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on FROM users WHERE tg_id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key FROM users WHERE tg_id = ? and active = 1
 `
 
 func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, error) {
@@ -87,6 +112,7 @@ func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, err
 		&i.DiscretionaryMonthly,
 		&i.ReportTime,
 		&i.ReportSentOn,
+		&i.ApiKey,
 	)
 	return i, err
 }
@@ -218,5 +244,19 @@ type SetReportScheduleParams struct {
 
 func (q *Queries) SetReportSchedule(ctx context.Context, arg SetReportScheduleParams) error {
 	_, err := q.db.ExecContext(ctx, setReportSchedule, arg.ReportTime, arg.ReportSentOn, arg.ID)
+	return err
+}
+
+const setUserAPIKey = `-- name: SetUserAPIKey :exec
+UPDATE users SET api_key = ? WHERE id = ?
+`
+
+type SetUserAPIKeyParams struct {
+	ApiKey *string `json:"api_key"`
+	ID     string  `json:"id"`
+}
+
+func (q *Queries) SetUserAPIKey(ctx context.Context, arg SetUserAPIKeyParams) error {
+	_, err := q.db.ExecContext(ctx, setUserAPIKey, arg.ApiKey, arg.ID)
 	return err
 }

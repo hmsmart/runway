@@ -49,3 +49,9 @@ INSERT INTO users (
     0,
     0
 );
+
+-- name: GetUserByAPIKey :one
+SELECT * FROM users WHERE api_key = ? AND active = 1;
+
+-- name: SetUserAPIKey :exec
+UPDATE users SET api_key = ? WHERE id = ?;

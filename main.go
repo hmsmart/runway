@@ -124,6 +124,7 @@ func run(ctx context.Context) error {
 	mux.Handle("GET /gauge/egt", requireSession(handleGaugeEGT(store)))
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
+	mux.Handle("POST /hook/hold", handleHoldWebhook(store, cfg, tg))
 	mux.Handle("GET /profilepic", handleProfilePic(store))
 	mux.HandleFunc("GET /login", handleLogin)
 	mux.Handle("GET /logout", handleLogout(store))

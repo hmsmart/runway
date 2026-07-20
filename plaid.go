@@ -65,6 +65,10 @@ func syncTransactions(ctx context.Context, itemID string, accessToken string, cu
 			notified = 1
 		}
 	}
+	item, err := store.GetItemByID(ctx, itemID)
+	if err != nil {
+		return fmt.Errorf("load item for hold adoption: %w", err)
+	}
 	var added, modified, removed int
 	for hasMore := true; hasMore; {
 		resp, err := fetchTransactionsPage(ctx, accessToken, cursor, plaidClient, cfg)
@@ -73,7 +77,7 @@ func syncTransactions(ctx context.Context, itemID string, accessToken string, cu
 			return err
 		}
 		nextCursor := resp.GetNextCursor()
-		if err := persistTransactionsPage(ctx, itemID, resp, nextCursor, store, cfg, notified); err != nil {
+		if err := persistTransactionsPage(ctx, itemID, resp, nextCursor, store, cfg, notified, item.UserID); err != nil {
 			slog.Error("failed to persist transactions", "cursor", cursorValue(cursor), "item", itemID, "err", err)
 			return err
 		}
@@ -103,7 +107,7 @@ func fetchTransactionsPage(ctx context.Context, accessToken string, cursor *stri
 // from the last completed page instead of re-downloading everything. Fresh
 // inserts land at notified = 0 for the drain worker; conflict updates leave
 // the flag alone so re-synced rows never re-announce.
-func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config, notified int64) error {
+func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.TransactionsSyncResponse, nextCursor string, store *database.Store, cfg *Config, notified int64, userID string) error {
 	now := time.Now()
 	return store.ExecTx(ctx, func(q *sqlcgen.Queries) error {
 		for _, tx := range slices.Concat(resp.GetAdded(), resp.GetModified()) {
@@ -138,6 +142,18 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 				}
 				if n, err := res.RowsAffected(); err == nil && n == 1 {
 					slog.Info("adopted pending transaction by match", "posted", params.PlaidTxID)
+					continue
+				}
+			}
+			// Adopt an iOS-shortcut hold: same user, same amount,
+			// cross-account (holds live on the manual account).
+			if !tx.GetPending() {
+				res, err := q.AdoptHoldByAmount(ctx, holdAdoptParams(params, userID))
+				if err != nil {
+					return fmt.Errorf("adopt hold for %s: %w", params.PlaidTxID, err)
+				}
+				if n, err := res.RowsAffected(); err == nil && n == 1 {
+					slog.Info("adopted hold transaction", "posted", params.PlaidTxID)
 					continue
 				}
 			}

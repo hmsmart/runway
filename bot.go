@@ -230,6 +230,10 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleDash, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/cash", bot.MatchTypePrefix,
 		chain(t.handleCash, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/hold", bot.MatchTypePrefix,
+		chain(t.handleHold, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/apikey", bot.MatchTypeExact,
+		chain(t.handleAPIKey, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	// /receipt is a discoverability stub: photos book themselves (see the
 	// MatchFunc above — photo messages carry a Caption, not Text, so the two
 	// never collide), and this just tells the user that.
@@ -324,11 +328,13 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"<code>/report [TIME]</code> — get the runway report every day at TIME (e.g. <code>/report 8:00</code>); <code>/report off</code> stops it\n" +
 			"<code>/budget [AMOUNT]</code> — view or update your monthly discretionary budget\n" +
 			"<code>/cash AMOUNT NOTE</code> — jot down a cash transaction (e.g. <code>/cash 5.50 taco truck</code>)\n" +
+			"<code>/hold AMOUNT [NAME]</code> — hold a card swipe until Plaid confirms it (e.g. <code>/hold 12.50 chipotle</code>)\n" +
 			"📸 or just send a photo of a receipt and I'll book it as a transaction\n" +
 			"<code>/dash</code> — sign in to your web dashboard\n" +
 			"<code>/link</code> — connect a bank account\n" +
 			"<code>/accounts</code> — list your linked accounts and balances\n" +
 			"<code>/unlink [N]</code> — list your accounts, or unlink one by number\n"
+		text += "<code>/apikey</code> — generate an API key for iOS Shortcuts\n"
 		if user.Has(domains.PermissionInvite) {
 			text += "<code>/invite</code> — create an invite code for a new user\n"
 		}
@@ -408,6 +414,62 @@ func (t *TelegramBot) handleCash(ctx context.Context, b *bot.Bot, update *models
 	t.recomputeSpend(ctx)
 	// The row landed at notified = 0; the drain worker announces it with the
 	// usual Spread/Exclude buttons.
+	t.startDrain(chatID)
+}
+
+func (t *TelegramBot) handleAPIKey(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	key := RandomToken(24, Base64)
+	if err := t.store.SetUserAPIKey(ctx, sqlcgen.SetUserAPIKeyParams{
+		ApiKey: &key,
+		ID:     user.ID(),
+	}); err != nil {
+		slog.Error("failed to set api key", "chatID", chatID, "err", err)
+		t.sendText(ctx, b, chatID, errTryLater)
+		return
+	}
+	t.sendText(ctx, b, chatID,
+		"🔑 Your new API key (replaces any previous one):\n\n"+
+			"<code>"+key+"</code>\n\n"+
+			"POST to <code>"+t.cfg.BaseURL+"/hook/hold</code> with header:\n"+
+			"<code>Authorization: Bearer YOUR_KEY</code>\n\n"+
+			"Body:\n"+
+			"<pre>{\"Amount\":\"12.50\",\"Merchant\":\"Store\",\"Name\":\"Card\"}</pre>")
+}
+
+func (t *TelegramBot) handleHold(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	msgID := update.Message.ID
+	fail := func(text string) {
+		t.react(ctx, chatID, msgID, "👎")
+		t.replyText(ctx, b, chatID, msgID, text)
+	}
+	raw := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/hold"))
+	if raw == "" {
+		fail("Usage: <code>/hold 12.50</code> or <code>/hold 12.50 chipotle</code>")
+		return
+	}
+	parts := strings.SplitN(raw, " ", 2)
+	amt, err := parseHoldAmount(parts[0])
+	if err != nil {
+		fail("Couldn't parse that amount. Try <code>/hold 12.50</code>")
+		return
+	}
+	merchant := "Card Transaction"
+	if len(parts) > 1 {
+		merchant = strings.TrimSpace(parts[1])
+	}
+	txID, err := createHoldTransaction(ctx, t.store, t.cfg, user.ID(), amt, merchant)
+	if err != nil {
+		slog.Error("failed to create hold", "chatID", chatID, "err", err)
+		fail(errTryLater)
+		return
+	}
+	slog.Info("created hold via command", "chatID", chatID, "tx", txID, "amt", amt, "merchant", merchant)
+	t.react(ctx, chatID, msgID, "👍")
+	t.recomputeSpend(ctx)
 	t.startDrain(chatID)
 }
 
@@ -921,11 +983,13 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 				models.BotCommand{Command: "report", Description: "Schedule a daily runway report"},
 				models.BotCommand{Command: "receipt", Description: "Send a photo of a receipt to book a transaction"},
 				models.BotCommand{Command: "cash", Description: "Jot down a transaction, e.g. /cash 5.50 taco truck"},
+				models.BotCommand{Command: "hold", Description: "Hold a card swipe, e.g. /hold 12.50 chipotle"},
 				models.BotCommand{Command: "dash", Description: "Sign in to your web dashboard"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},
 				models.BotCommand{Command: "unlink", Description: "List accounts, or unlink one by number"},
 			)
+			cmds = append(cmds, models.BotCommand{Command: "apikey", Description: "Generate an API key for iOS Shortcuts"})
 			if user.Has(domains.PermissionInvite) {
 				cmds = append(cmds, models.BotCommand{Command: "invite", Description: "Create an invite code for a new user"})
 			}
@@ -1031,6 +1095,9 @@ func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 		if err := t.store.MarkUnnotifiableTransactions(ctx, windowCutoff); err != nil {
 			slog.Error("failed to retire unnotifiable transactions", "chatID", chatID, "err", err)
 			return
+		}
+		if err := t.store.ExpireStaleHolds(ctx); err != nil {
+			slog.Error("failed to expire stale holds", "chatID", chatID, "err", err)
 		}
 		if !t.sweepStaleMessages(ctx, chatID) {
 			return

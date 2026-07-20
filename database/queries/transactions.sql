@@ -175,6 +175,57 @@ WHERE transactions.tx_id = sqlc.arg(pending_tx_id)
   AND transactions.pending = 1
   AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = sqlc.arg(posted_plaid_id));
 
+-- name: AdoptHoldByAmount :execresult
+-- When a Plaid transaction arrives and no pending adoption or tip-range
+-- candidate matched, try to claim a hold row created by the iOS webhook.
+-- Holds live on the manual account, so matching is cross-account: same user
+-- (via items), same amount, swipe date within the settlement window. The
+-- adopted row moves to the real account and inherits all Plaid metadata.
+UPDATE transactions SET
+    plaid_tx_id = sqlc.arg(posted_plaid_id),
+    account_id = sqlc.arg(account_id),
+    date = sqlc.arg(date),
+    authorized_date = COALESCE(sqlc.arg(authorized_date), authorized_date, date),
+    amount = sqlc.arg(amount),
+    name = sqlc.arg(name),
+    merchant_name = sqlc.arg(merchant_name),
+    category_primary = sqlc.arg(category_primary),
+    category_detailed = sqlc.arg(category_detailed),
+    category_confidence = sqlc.arg(category_confidence),
+    payment_channel = sqlc.arg(payment_channel),
+    pending = 0,
+    removed_at = NULL,
+    message_stale = 1,
+    logo_url = COALESCE(sqlc.arg(logo_url), logo_url),
+    raw_json = sqlc.arg(raw_json)
+WHERE transactions.tx_id = (
+    SELECT h.tx_id FROM transactions h
+    JOIN accounts a ON a.account_id = h.account_id
+    JOIN items i ON i.item_id = a.item_id
+    WHERE h.plaid_tx_id LIKE 'hold:%'
+      AND h.pending = 1
+      AND h.removed_at IS NULL
+      AND i.user_id = sqlc.arg(user_id)
+      AND h.amount = sqlc.arg(amount)
+      AND COALESCE(h.authorized_date, h.date)
+          BETWEEN date(CAST(sqlc.arg(effective_date) AS TEXT), '-7 days')
+              AND CAST(sqlc.arg(effective_date) AS TEXT)
+    ORDER BY COALESCE(h.authorized_date, h.date) DESC, h.tx_id ASC
+    LIMIT 1
+)
+  AND NOT EXISTS (SELECT 1 FROM transactions t2 WHERE t2.plaid_tx_id = sqlc.arg(posted_plaid_id));
+
+-- name: ExpireStaleHolds :exec
+-- Soft-delete hold transactions older than 2 days that never matched a
+-- Plaid transaction. Sets message_stale so the drain worker strikes through
+-- the card and adds a thumbs-down reaction, same as a preauth that fell off.
+-- Date columns are YYYY-MM-DD text, so 2 days is the closest we get to 48h.
+UPDATE transactions SET removed_at = datetime('now'), message_stale = 1
+WHERE plaid_tx_id LIKE 'hold:%'
+  AND pending = 1
+  AND removed_at IS NULL
+  AND COALESCE(authorized_date, date) < date('now', '-2 days');
+
 -- name: SetExcluded :exec
 UPDATE transactions SET excluded = ? WHERE tx_id = ?;
 

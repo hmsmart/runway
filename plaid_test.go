@@ -83,7 +83,7 @@ func persistAdded(t *testing.T, store *database.Store, cfg *Config, cursor strin
 	t.Helper()
 	resp := plaid.TransactionsSyncResponse{}
 	resp.SetAdded(txs)
-	if err := persistTransactionsPage(context.Background(), "item1", resp, cursor, store, cfg, 0); err != nil {
+	if err := persistTransactionsPage(context.Background(), "item1", resp, cursor, store, cfg, 0, "u1"); err != nil {
 		t.Fatalf("persist page: %v", err)
 	}
 }
