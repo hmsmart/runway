@@ -1,0 +1,277 @@
+// Wiring guide — final cockpit layout
+//
+// This file documents the diffs to apply to the existing codebase.
+// All .go.txt renderer files in this project are drop-in replacements.
+
+// ============================================================================
+// FINAL LAYOUT: 3-column cockpit
+// ============================================================================
+//
+//     ┌──────┐ ┌──────┐ ┌──────┐
+//     │ CAS  │ │ ADI  │ │ EGT  │
+//     │      │ │      │ │      │
+//     │      │ ├──────┤ │      │
+//     │      │ │ VSI  │ │      │
+//     └──────┘ └──────┘ └──────┘
+//
+// CAS (200×400 tall): lamps + TARGET/COMMIT/AVAIL/G·S + markers + fuel strip
+// ADI (200×200 round): attitude + CDI deviation (sign flipped: - = losing days)
+// VSI (200×200 round): delta runway days trend
+// EGT (200×400 tall): TOTAL at top, 8 category heat strips
+//
+// Deleted instruments: Corrective, ASI, CDI, DME, Totalizer, Fuel (standalone),
+//                      Engines, Annunciator (standalone)
+// All absorbed into CAS or EGT.
+
+// ============================================================================
+// 1. charts/annunciator.go — model changes (SAME AS BEFORE)
+// ============================================================================
+//
+// Add LampFuel to the Annunciator struct:
+//
+//     type Annunciator struct {
+//         Lamp14    Lamp
+//         Lamp28    Lamp
+//         LampSync  Lamp
+//         LampFuel  Lamp
+//     }
+//
+// Add fuelLow bool parameter to ComputeAnnunciator:
+//
+//     func ComputeAnnunciator(
+//         targetDaily, ema14, ema28 float64,
+//         ema14Prev, ema28Prev float64,
+//         daysLeft int, remainingBudget float64,
+//         syncOK bool,
+//         fuelLow bool,
+//     ) Annunciator {
+//         // ... existing lamp logic ...
+//         a.LampFuel = Lamp{Label: "FUEL", State: LampUnder, Value: "OK"}
+//         if fuelLow {
+//             a.LampFuel = Lamp{Label: "FUEL", State: LampOver, Value: "LOW"}
+//         }
+//         return a
+//     }
+//
+// Delete the old AnnunciatorSVG function — replaced by CASPanelSVG.
+
+// ============================================================================
+// 2. charts/cas_panel.go — REPLACED (use cas_panel.go.txt)
+// ============================================================================
+//
+// New CASPanelState struct:
+//
+//     type CASPanelState struct {
+//         Annunciator Annunciator
+//         Target      string   // daily budget allowance formatted, e.g. "$46"
+//         Commit      string   // recurring daily burn formatted, e.g. "$18"
+//         TargetVal   float64  // numeric for AVAIL computation
+//         CommitVal   float64  // numeric for AVAIL computation
+//         Reduction   float64  // glideslope: 0 = OK, >0 = cut $/day
+//         HasBudget   bool
+//         Consumed    float64  // 0..1 budget consumed fraction
+//         HasFuel     bool
+//         Days14      float64
+//         Days28      float64
+//     }
+//
+// CASPanelSVG renders: 4 lamps → TARGET/COMMIT/AVAIL/G·S → O/M/I markers
+// → fuel strip. AVAIL = TargetVal - CommitVal (computed in renderer).
+// G/S shows "OK" when Reduction ≤ 0, "−$X.XX" when over.
+//
+// MarkersStripSVG is DELETED — markers live inside CAS now.
+
+// ============================================================================
+// 3. charts/adi.go — REPLACED (use adi.go.txt)
+// ============================================================================
+//
+// CDI merged into ADI. CDI readout sign FLIPPED:
+//   display = -DevDays
+//   -2.3d = losing 2.3 runway days (over budget)
+//   +0.7d = gaining 0.7 runway days (under budget)
+//
+// Diamond color/deflection still key off internal DevDays (unchanged).
+
+// ============================================================================
+// 4. charts/egt_panel.go — REPLACED (use egt_panel.go.txt)
+// ============================================================================
+//
+// TOTAL row at top (sums ALL categories, not just shown 8).
+// Divider between TOTAL and per-category rows.
+// Row height 34px (down from 38px) to fit TOTAL + 8 categories.
+
+// ============================================================================
+// 5. chart_handlers.go — handleGaugeCAS (REWRITTEN)
+// ============================================================================
+//
+//     func handleGaugeCAS(store *database.Store) http.HandlerFunc {
+//         return chartHandler(func(r *http.Request, userID string) (string, error) {
+//             dailies, err := loadDailies(r.Context(), store, userID)
+//             if err != nil { return "", err }
+//             userRow, err := store.GetUserByID(r.Context(), userID)
+//             if err != nil { return "", err }
+//             s, err := snapshotEMAs(dailies, "cas")
+//             if err != nil { return "", err }
+//             accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
+//             if err != nil { return "", err }
+//
+//             now := time.Now()
+//             burnMTD := monthToDateSpend(dailies, now)
+//             targetDaily := s.Target
+//             daysLeft := 0
+//             remainingBudget := 0.0
+//             hasBudget := false
+//             fuelLow := false
+//             consumed := 0.0
+//             reduction := 0.0
+//
+//             if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
+//                 hasBudget = true
+//                 monthly := *userRow.DiscretionaryMonthly
+//                 daysLeft = max(daysInMonth(now)-now.Day()+1, 1)
+//                 remainingBudget = max(monthly-burnMTD, 0)
+//                 consumed = burnMTD / monthly
+//                 if targetDaily <= 0 {
+//                     targetDaily = monthly / float64(daysInMonth(now))
+//                 }
+//                 // Fuel low check.
+//                 if daysLeft > 0 && remainingBudget/float64(daysLeft) < s.E14*0.5 {
+//                     fuelLow = true
+//                 }
+//                 if remainingBudget <= 0 { fuelLow = true }
+//                 // G/S corrective reduction.
+//                 adjustedDaily := remainingBudget / float64(daysLeft)
+//                 reduction = math.Max(s.E14-adjustedDaily, 0)
+//             }
+//
+//             annState := charts.ComputeAnnunciator(
+//                 targetDaily, s.E14, s.E28,
+//                 s.PrevE14, s.PrevE28,
+//                 daysLeft, remainingBudget,
+//                 syncFresh(accounts), fuelLow,
+//             )
+//
+//             // COMMIT: sum recurring transaction amounts / 30.
+//             // TODO: query recurring/subscription transactions from DB.
+//             // For now, placeholder — wire to actual recurring query.
+//             commitDaily := 0.0 // store.SumRecurringByUser(ctx, userID) / 30
+//
+//             // Fuel.
+//             cash, owed := cashOnHand(accounts)
+//             net := cash - owed
+//             hasFuel := false
+//             var days14, days28 float64
+//             if net > 0 && s.E14 > 0 {
+//                 hasFuel = true
+//                 days14 = runwayFuelDays(net, s.E14)
+//                 days28 = runwayFuelDays(net, s.E28)
+//             }
+//
+//             state := charts.CASPanelState{
+//                 Annunciator: annState,
+//                 Target:      formatDollars(math.Round(targetDaily)),
+//                 Commit:      formatDollars(math.Round(commitDaily)),
+//                 TargetVal:   targetDaily,
+//                 CommitVal:   commitDaily,
+//                 Reduction:   reduction,
+//                 HasBudget:   hasBudget,
+//                 Consumed:    consumed,
+//                 HasFuel:     hasFuel,
+//                 Days14:      days14,
+//                 Days28:      days28,
+//             }
+//             return charts.CASPanelSVG(state), nil
+//         })
+//     }
+
+// ============================================================================
+// 6. main.go — route changes
+// ============================================================================
+//
+// KEEP:
+//     mux.Handle("GET /gauge/cas", requireSession(handleGaugeCAS(store)))
+//     mux.Handle("GET /gauge/adi", requireSession(handleGaugeADI(store)))
+//     mux.Handle("GET /gauge/vsi", requireSession(handleGaugeVSI(store)))
+//     mux.Handle("GET /gauge/egt", requireSession(handleGaugeEGT(store)))
+//
+// DELETE:
+//     /gauge/corrective  (G/S folded into CAS)
+//     /gauge/asi         (redundant with ADI pitch)
+//     /gauge/cdi         (merged into ADI)
+//     /gauge/dme         (folded into CAS)
+//     /gauge/totalizer   (folded into CAS)
+//     /gauge/annunciator (replaced by /gauge/cas)
+//     /gauge/fuel        (fuel strip in CAS)
+//     /gauge/engines     (replaced by /gauge/egt)
+//
+// KEEP BUT UNUSED (standalone fuel gauge — might restore later):
+//     /gauge/fuel        (optional, keep handler)
+
+// ============================================================================
+// 7. templates/dashboard.templ — 3-column layout
+// ============================================================================
+//
+//     templ DashboardPage(name string) {
+//         @Layout("dashboard") {
+//             <hgroup>
+//                 <h1>welcome back, { strings.ToLower(name) }</h1>
+//                 <p>your runway at a glance</p>
+//             </hgroup>
+//             <div class="cockpit">
+//                 <div class="cockpit__grid">
+//                     @instrumentTall("/gauge/cas", "cas · status")
+//                     <div class="cockpit__center">
+//                         @instrument("/gauge/adi", "adi · attitude + deviation")
+//                         @instrument("/gauge/vsi", "vsi · runway days trend")
+//                     </div>
+//                     @instrumentTall("/gauge/egt", "egt · category heat")
+//                 </div>
+//             </div>
+//         }
+//     }
+
+// ============================================================================
+// 8. static/css/style.css — grid + mobile
+// ============================================================================
+//
+//     .cockpit__grid {
+//         display: grid;
+//         grid-template-columns: 1fr 1.2fr 1fr;
+//         gap: 8px;
+//         align-items: start;
+//     }
+//     .cockpit__center {
+//         display: flex;
+//         flex-direction: column;
+//         gap: 8px;
+//     }
+//     .cockpit__instrument--tall object {
+//         aspect-ratio: 1 / 2;
+//     }
+//
+//     /* Mobile: CAS only */
+//     @media (max-width: 640px) {
+//         .cockpit__grid {
+//             grid-template-columns: 1fr;
+//         }
+//         .cockpit__center,
+//         .cockpit__instrument--tall:last-child { /* EGT */
+//             display: none;
+//         }
+//     }
+
+// ============================================================================
+// 9. COMMIT field — wiring TODO
+// ============================================================================
+//
+// COMMIT shows the user's committed daily spend (subscriptions, recurring
+// charges) amortized over 30 days. This requires:
+//
+// Option A: Tag recurring transactions in the DB (a "recurring" bool or
+//           frequency field on transactions), query sum, divide by 30.
+// Option B: Use Plaid's recurring transaction detection if available.
+// Option C: Let the user set a manual "committed spend" amount in settings
+//           (like DiscretionaryMonthly but for fixed costs).
+//
+// For now the handler passes commitDaily = 0 with a TODO comment.
+// The CAS panel renders "$0" for COMMIT and AVAIL = TARGET when unfilled.

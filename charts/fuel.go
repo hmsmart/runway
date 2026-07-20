@@ -67,8 +67,9 @@ func fuelOpen(b *strings.Builder) {
 // Fuel renders the days-of-runway gauge: cash on hand divided by the smoothed
 // daily burn. Two needles, one per EMA horizon, wearing the site-wide horizon
 // colors. Pass math.Inf(1) for a horizon whose burn rate is zero (cash never
-// runs out); negative days clamp to empty.
-func Fuel(days14, days28 float64) string {
+// runs out); negative days clamp to empty. totalBurn is shown as a secondary
+// readout line.
+func Fuel(days14, days28, totalBurn float64) string {
 	const cx, cy = fuelCX, fuelCY
 	var b strings.Builder
 	fuelOpen(&b)
@@ -85,6 +86,7 @@ func Fuel(days14, days28 float64) string {
 
 	b.WriteString(`<rect x="52" y="148" width="96" height="24" rx="4" class="readout-window"/>`)
 	fmt.Fprintf(&b, `<text x="100" y="164" text-anchor="middle" class="readout"><tspan>%s</tspan><tspan class="readout-unit"> DAYS</tspan></text>`, esc(fuelReadout(days14)))
+	fmt.Fprintf(&b, `<text x="100" y="176" text-anchor="middle" font-size="8" class="muted">BURN %s</text>`, esc(fmtWhole(totalBurn)))
 
 	b.WriteString(`</g></svg>`)
 	return b.String()

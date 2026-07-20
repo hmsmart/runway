@@ -8,22 +8,14 @@ templ DashboardPage(name string) {
             <h1>welcome back, { strings.ToLower(name) }</h1>
             <p>your runway at a glance</p>
         </hgroup>
-        // The cockpit: each instrument is a standalone SVG document; <object>
-        // (not <img>) lets each one load the site stylesheet, so they follow
-        // the theme and its light/dark scheme. See the chart-theme block in
-        // style.css.
         <div class="cockpit">
             <div class="cockpit__grid">
-                @instrument("/gauge/asi", "asi · daily burn")
-                @instrument("/gauge/adi", "attitude · burn vs target")
-                @instrument("/gauge/fuel", "fuel · days of runway")
-                @instrument("/gauge/vsi", "vsi · runway days delta")
-                @instrument("/gauge/cdi", "cdi · budget deviation")
-                @instrument("/gauge/dme", "dme · flight data")
-                @instrument("/gauge/annunciator", "cas · spend status")
-                @instrument("/gauge/corrective", "corrective · spend reduction")
-                @instrument("/gauge/totalizer", "totalizer · markers & total burn")
-                @instrument("/gauge/engines", "egt · category heat")
+                @instrumentTall("/gauge/cas", "cas · status")
+                <div class="cockpit__center">
+                    @instrument("/gauge/adi", "adi · attitude + deviation")
+                    @instrument("/gauge/vsi", "vsi · runway days trend")
+                </div>
+                @instrumentTall("/gauge/egt", "egt · category heat")
             </div>
         </div>
     }
@@ -31,6 +23,13 @@ templ DashboardPage(name string) {
 
 templ instrument(src, placard string) {
     <div class="instrument">
+        <object type="image/svg+xml" data={ src }>{ placard }</object>
+        <p class="placard">{ placard }</p>
+    </div>
+}
+
+templ instrumentTall(src, placard string) {
+    <div class="instrument cockpit__instrument--tall">
         <object type="image/svg+xml" data={ src }>{ placard }</object>
         <p class="placard">{ placard }</p>
     </div>

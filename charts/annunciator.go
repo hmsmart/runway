@@ -167,51 +167,6 @@ func computeLamp(label string, current, prev, target float64) Lamp {
 	return l
 }
 
-// AnnunciatorSVG renders the CAS-style annunciator panel as a standalone
-// 200x200 SVG. Lamps are dark when nominal (UNDER/OK) and illuminate
-// red (OVER) or amber (WARN) only when active.
-func AnnunciatorSVG(a Annunciator) string {
-	const w, h = 200, 200
-
-	var b strings.Builder
-	svgOpen(&b, w, h, "spend annunciator - CAS panel", `
-.cas-panel{fill:#0f1318;stroke:var(--chart-axis,#c6ccd4);stroke-width:1.5;rx:10}
-.cas-title{font-size:9px;letter-spacing:2.5px}
-.cas-status{font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-weight:700}
-.cas-faults{font-family:'B612 Mono',var(--chart-font,system-ui,sans-serif);font-size:7px;letter-spacing:1px}
-`)
-
-	b.WriteString(`<g>`)
-	b.WriteString(`<rect x="8" y="8" width="184" height="184" class="cas-panel"/>`)
-	b.WriteString(`<text x="100" y="26" text-anchor="middle" class="cas-title" style="fill:#5a6270">CAS - SPEND</text>`)
-
-	faults := 0
-	lamps := [4]Lamp{a.Lamp14, a.Lamp28, a.LampSync, a.LampFuel}
-	positions := [4][2]float64{{16, 34}, {104, 34}, {16, 94}, {104, 94}}
-
-	for i, lamp := range lamps {
-		x, y := positions[i][0], positions[i][1]
-		casLamp(&b, x, y, lamp)
-		if lamp.State != LampUnder {
-			faults++
-		}
-	}
-
-	if faults > 0 {
-		b.WriteString(`<text x="100" y="168" text-anchor="middle" font-size="8" class="cas-status" style="fill:#e24b4a;letter-spacing:1.5px">CORRECTIVE ACTION</text>`)
-		fmt.Fprintf(&b, `<text x="100" y="182" text-anchor="middle" class="cas-faults" style="fill:#5a6270">%d FAULT`, faults)
-		if faults > 1 {
-			b.WriteString(`S`)
-		}
-		b.WriteString(` ACTIVE</text>`)
-	} else {
-		b.WriteString(`<text x="100" y="168" text-anchor="middle" font-size="8" class="cas-status" style="fill:#333a44;letter-spacing:1.5px">ON GLIDESLOPE</text>`)
-		b.WriteString(`<text x="100" y="182" text-anchor="middle" class="cas-faults" style="fill:#333a44">NO FAULTS</text>`)
-	}
-
-	b.WriteString(`</g></svg>`)
-	return b.String()
-}
 
 // casLamp renders a single CAS lamp at position (x, y) with size 80x52.
 // Dark when UNDER, amber-lit when WARN, red-lit when OVER.

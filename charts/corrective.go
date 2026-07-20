@@ -32,6 +32,7 @@ func CorrectiveSVG(s CorrectiveState) string {
 	if maxV <= 0 {
 		maxV = 10
 	}
+	maxV = niceScale(maxV)
 
 	// 270-degree sweep: 135 degrees (down-left) to 405 degrees (down-right), same as ASI.
 	angle := func(v float64) float64 {
@@ -114,4 +115,23 @@ func correctiveReduction(ema14, remainingBudget float64, daysLeft int) float64 {
 	adjustedDaily := remainingBudget / float64(daysLeft)
 	reduction := ema14 - adjustedDaily
 	return math.Max(reduction, 0)
+}
+
+// niceScale rounds a positive max value up to a clean 1/2/5x10^n number.
+func niceScale(v float64) float64 {
+	if v <= 0 {
+		return 10
+	}
+	mag := math.Pow(10, math.Floor(math.Log10(v)))
+	norm := v / mag
+	step := 10.0
+	switch {
+	case norm <= 1:
+		step = 1
+	case norm <= 2:
+		step = 2
+	case norm <= 5:
+		step = 5
+	}
+	return step * mag
 }

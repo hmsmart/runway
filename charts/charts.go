@@ -22,7 +22,7 @@ import (
 // StyleHref is the site stylesheet URL, cache-buster included. The layout's
 // <link> and every SVG's @import go through this one constant so a style
 // change busts both caches together.
-const StyleHref = "/assets/css/style.css?v=14"
+const StyleHref = "/assets/css/style.css?v=15"
 
 // Day is one row of the daily-spend series. EMA pointers are nil only for
 // legacy rows that predate a smoothing column; renderers skip those points.

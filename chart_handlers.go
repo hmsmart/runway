@@ -340,16 +340,38 @@ func handleGaugeADI(store *database.Store) http.HandlerFunc {
 		if err != nil {
 			return "", err
 		}
+		userRow, err := store.GetUserByID(r.Context(), userID)
+		if err != nil {
+			return "", err
+		}
 		s, err := snapshotEMAs(dailies, "adi")
 		if err != nil {
 			return "", err
 		}
-		burnMTD := monthToDateSpend(dailies, time.Now())
-		return charts.ADI(charts.ComputeADI(s.Target, s.E14, s.E28, burnMTD)), nil
+		now := time.Now()
+		burnMTD := monthToDateSpend(dailies, now)
+
+		targetDaily := s.Target
+		hasBudget := userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0
+		var devDays, devDollars float64
+		if hasBudget {
+			dailyAllowance := *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
+			plannedCumulative := dailyAllowance * float64(now.Day())
+			devDollars = burnMTD - plannedCumulative
+			if dailyAllowance > 0 {
+				devDays = devDollars / dailyAllowance
+			}
+			if targetDaily <= 0 {
+				targetDaily = dailyAllowance
+			}
+		}
+
+		state := charts.ComputeADI(targetDaily, s.E14, s.E28, burnMTD, hasBudget, devDays, devDollars)
+		return charts.ADI(state), nil
 	})
 }
 
-func handleGaugeAnnunciator(store *database.Store) http.HandlerFunc {
+func handleGaugeCAS(store *database.Store) http.HandlerFunc {
 	return chartHandler(func(r *http.Request, userID string) (string, error) {
 		dailies, err := loadDailies(r.Context(), store, userID)
 		if err != nil {
@@ -359,7 +381,7 @@ func handleGaugeAnnunciator(store *database.Store) http.HandlerFunc {
 		if err != nil {
 			return "", err
 		}
-		s, err := snapshotEMAs(dailies, "annunciator")
+		s, err := snapshotEMAs(dailies, "cas")
 		if err != nil {
 			return "", err
 		}
@@ -373,12 +395,19 @@ func handleGaugeAnnunciator(store *database.Store) http.HandlerFunc {
 		targetDaily := s.Target
 		daysLeft := 0
 		remainingBudget := 0.0
+		hasBudget := false
 		fuelLow := false
+		consumed := 0.0
+		reduction := 0.0
+
 		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
+			hasBudget = true
+			monthly := *userRow.DiscretionaryMonthly
 			daysLeft = max(daysInMonth(now)-now.Day()+1, 1)
-			remainingBudget = max(*userRow.DiscretionaryMonthly-burnMTD, 0)
+			remainingBudget = max(monthly-burnMTD, 0)
+			consumed = burnMTD / monthly
 			if targetDaily <= 0 {
-				targetDaily = *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
+				targetDaily = monthly / float64(daysInMonth(now))
 			}
 			if daysLeft > 0 && remainingBudget/float64(daysLeft) < s.E14*0.5 {
 				fuelLow = true
@@ -386,47 +415,59 @@ func handleGaugeAnnunciator(store *database.Store) http.HandlerFunc {
 			if remainingBudget <= 0 {
 				fuelLow = true
 			}
-		}
-
-		state := charts.ComputeAnnunciator(targetDaily, s.E14, s.E28, s.PrevE14, s.PrevE28, daysLeft, remainingBudget, syncFresh(accounts), fuelLow)
-		return charts.AnnunciatorSVG(state), nil
-	})
-}
-
-func handleGaugeCorrective(store *database.Store) http.HandlerFunc {
-	return chartHandler(func(r *http.Request, userID string) (string, error) {
-		dailies, err := loadDailies(r.Context(), store, userID)
-		if err != nil {
-			return "", err
-		}
-		userRow, err := store.GetUserByID(r.Context(), userID)
-		if err != nil {
-			return "", err
-		}
-		s, err := snapshotEMAs(dailies, "corrective")
-		if err != nil {
-			return "", err
-		}
-
-		now := time.Now()
-		state := charts.CorrectiveState{}
-
-		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
-			burnMTD := monthToDateSpend(dailies, now)
-			daysLeft := max(daysInMonth(now)-now.Day()+1, 1)
-			remainingBudget := max(*userRow.DiscretionaryMonthly-burnMTD, 0)
 			adjustedDaily := remainingBudget / float64(daysLeft)
-
-			state.Reduction = math.Max(s.E14-adjustedDaily, 0)
-			state.MaxScale = *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
-			if state.MaxScale < state.Reduction*1.2 {
-				state.MaxScale = state.Reduction * 1.5
-			}
+			reduction = math.Max(s.E14-adjustedDaily, 0)
 		}
 
-		return charts.CorrectiveSVG(state), nil
+		annState := charts.ComputeAnnunciator(
+			targetDaily, s.E14, s.E28,
+			s.PrevE14, s.PrevE28,
+			daysLeft, remainingBudget,
+			syncFresh(accounts), fuelLow,
+		)
+
+		// COMMIT: today's spread-transaction slices already promised.
+		commitDaily := 0.0
+		spentToday := 0.0
+		if txs, err := store.ListSpendTransactionsByUser(r.Context(), userID); err == nil {
+			commitDaily = todaysCommitments(txs, now.Format(time.DateOnly))
+		}
+		if todayRow, err := store.GetDailySpendDay(r.Context(), sqlcgen.GetDailySpendDayParams{
+			UserID: userID,
+			Date:   now.Format(time.DateOnly),
+		}); err == nil {
+			spentToday = math.Max(todayRow.Spend-commitDaily, 0)
+		}
+
+		cash, owed := cashOnHand(accounts)
+		net := cash - owed
+		hasFuel := false
+		var days14, days28 float64
+		if net > 0 && s.E14 > 0 {
+			hasFuel = true
+			days14 = runwayFuelDays(net, s.E14)
+			days28 = runwayFuelDays(net, s.E28)
+		}
+
+		state := charts.CASPanelState{
+			Annunciator: annState,
+			Target:      formatDollars(math.Round(targetDaily)),
+			Commit:      formatDollarsCents(commitDaily),
+			SpentToday:  formatDollarsCents(spentToday),
+			TargetVal:   targetDaily,
+			CommitVal:   commitDaily,
+			SpentTodVal: spentToday,
+			Reduction:   reduction,
+			HasBudget:   hasBudget,
+			Consumed:    consumed,
+			HasFuel:     hasFuel,
+			Days14:      days14,
+			Days28:      days28,
+		}
+		return charts.CASPanelSVG(state), nil
 	})
 }
+
 
 // runwayFuelDays converts cash and a burn rate to days of runway for the fuel
 // gauge: zero when the cash is gone, infinite when nothing is burning.
@@ -459,164 +500,30 @@ func handleGaugeFuel(store *database.Store) http.HandlerFunc {
 		}
 		cash, owed := cashOnHand(accounts)
 		net := cash - owed
-		return charts.Fuel(runwayFuelDays(net, s.E14), runwayFuelDays(net, s.E28)), nil
-	})
-}
 
-func handleGaugeASI(store *database.Store) http.HandlerFunc {
-	return chartHandler(func(r *http.Request, userID string) (string, error) {
-		dailies, err := loadDailies(r.Context(), store, userID)
-		if err != nil {
-			return "", err
-		}
-		s, err := snapshotEMAs(dailies, "asi")
-		if err != nil {
-			return "", err
-		}
-		userRow, err := store.GetUserByID(r.Context(), userID)
-		if err != nil {
-			return "", err
-		}
-
-		// Airspeed is a 7-day trailing mean of complete days — today's
-		// partial total would read as a lull every morning.
-		now := time.Now()
-		today := now.Format(time.DateOnly)
-		var speeds []float64
-		for _, d := range dailies {
-			if d.Date < today {
-				speeds = append(speeds, d.Spend)
-			}
-		}
-		if len(speeds) == 0 {
-			return "", fmt.Errorf("insufficient asi history")
-		}
-		if len(speeds) > 7 {
-			speeds = speeds[len(speeds)-7:]
-		}
-		sum := 0.0
-		for _, v := range speeds {
-			sum += v
-		}
-		speed := sum / float64(len(speeds))
-
-		// The green arc anchors to the budget's daily allowance when one is
-		// set; the long-horizon baseline otherwise.
-		target := s.Target
-		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
-			target = *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
-		}
-		return charts.ASI(speed, target), nil
-	})
-}
-
-func handleGaugeTotalizer(store *database.Store) http.HandlerFunc {
-	return chartHandler(func(r *http.Request, userID string) (string, error) {
-		// The odometer wants the whole series, not the gauges' 90-day window.
-		dailies, err := store.ListDailySpendByUserSince(r.Context(), sqlcgen.ListDailySpendByUserSinceParams{
+		allDailies, err := store.ListDailySpendByUserSince(r.Context(), sqlcgen.ListDailySpendByUserSinceParams{
 			UserID: userID,
 			Date:   "",
 		})
 		if err != nil {
 			return "", err
 		}
-		userRow, err := store.GetUserByID(r.Context(), userID)
-		if err != nil {
-			return "", err
+		totalBurn := 0.0
+		for _, d := range allDailies {
+			totalBurn += d.Spend
 		}
 
-		total := 0.0
-		for _, d := range dailies {
-			total += d.Spend
-		}
-		t := charts.Totalizer{TotalBurn: total}
-		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
-			t.HasBudget = true
-			t.Consumed = monthToDateSpend(dailies, time.Now()) / *userRow.DiscretionaryMonthly
-		}
-		return charts.TotalizerSVG(t), nil
+		return charts.Fuel(runwayFuelDays(net, s.E14), runwayFuelDays(net, s.E28), totalBurn), nil
 	})
 }
 
-func handleGaugeCDI(store *database.Store) http.HandlerFunc {
-	return chartHandler(func(r *http.Request, userID string) (string, error) {
-		userRow, err := store.GetUserByID(r.Context(), userID)
-		if err != nil {
-			return "", err
-		}
-		if userRow.DiscretionaryMonthly == nil || *userRow.DiscretionaryMonthly <= 0 {
-			return charts.CDI(charts.CDIState{}), nil
-		}
-		dailies, err := loadDailies(r.Context(), store, userID)
-		if err != nil {
-			return "", err
-		}
-		now := time.Now()
-		allowance := *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
-		// Planned pace through the end of today vs what actually burned.
-		planned := allowance * float64(now.Day())
-		devDollars := monthToDateSpend(dailies, now) - planned
-		return charts.CDI(charts.CDIState{
-			DevDays:    devDollars / allowance,
-			DevDollars: devDollars,
-			HasBudget:  true,
-		}), nil
-	})
-}
 
-func handleGaugeDME(store *database.Store) http.HandlerFunc {
-	return chartHandler(func(r *http.Request, userID string) (string, error) {
-		dailies, err := loadDailies(r.Context(), store, userID)
-		if err != nil {
-			return "", err
-		}
-		s, err := snapshotEMAs(dailies, "dme")
-		if err != nil {
-			return "", err
-		}
-		accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
-		if err != nil {
-			return "", err
-		}
-		userRow, err := store.GetUserByID(r.Context(), userID)
-		if err != nil {
-			return "", err
-		}
-
-		now := time.Now()
-		cash, owed := cashOnHand(accounts)
-		net := cash - owed
-		burnMTD := monthToDateSpend(dailies, now)
-
-		runway := "∞"
-		if !hasDepository(accounts) {
-			runway = "− − −" // no cash account: runway isn't computable
-		} else if days := runwayFuelDays(net, s.E14); !math.IsInf(days, 1) {
-			runway = fmt.Sprintf("%.0f D", days)
-		}
-		remaining := "− − −"
-		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
-			rem := *userRow.DiscretionaryMonthly - burnMTD
-			remaining = formatDollars(math.Round(math.Abs(rem)))
-			if rem < 0 {
-				remaining = "-" + remaining
-			}
-		}
-		return charts.DME([]charts.DMERow{
-			{Label: "RNWY", Value: runway},
-			{Label: "RATE", Value: formatDollars(math.Round(s.E14)) + "/D"},
-			{Label: "BURN", Value: formatDollars(math.Round(burnMTD))},
-			{Label: "BGT REM", Value: remaining},
-		}), nil
-	})
-}
-
-func handleGaugeEngines(store *database.Store) http.HandlerFunc {
+func handleGaugeEGT(store *database.Store) http.HandlerFunc {
 	return chartHandler(func(r *http.Request, userID string) (string, error) {
 		cats, err := categoryEMAs(r.Context(), store, userID)
 		if err != nil {
 			return "", err
 		}
-		return charts.Engines(cats), nil
+		return charts.EGTPanel(cats), nil
 	})
 }

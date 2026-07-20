@@ -250,11 +250,18 @@ td.descr .merchant-logo {
 }
 .cockpit__grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 1.25rem;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+    align-items: start;
+}
+.cockpit__center {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 .cockpit object { display: block; width: 100%; }
 .instrument object { aspect-ratio: 1; }
+.cockpit__instrument--tall object { aspect-ratio: 1 / 2; }
 .cockpit .placard {
     margin: 0.375rem 0 0;
     font-family: "B612 Mono", monospace;
@@ -264,16 +271,29 @@ td.descr .merchant-logo {
     text-align: center;
     opacity: 0.6;
 }
-.cockpit__strip { margin-top: 1.25rem; }
-/* The engine strip keeps a readable natural width and scrolls sideways on
- * narrow screens instead of shrinking its mini gauges into noise. */
-.cockpit__strip { overflow-x: auto; }
-.cockpit__strip object { aspect-ratio: 800 / 170; min-width: 640px; }
-@media (max-width: 992px) {
-    .cockpit__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 576px) {
+/* Mobile: CAS only, centered in the plate */
+@media (max-width: 640px) {
     .cockpit { padding: 1rem; }
-    .cockpit__grid { grid-template-columns: 1fr; }
-    .instrument { max-width: 420px; margin-inline: auto; width: 100%; }
+    .cockpit__grid {
+        grid-template-columns: 1fr;
+        justify-items: center;
+    }
+    .cockpit__grid > .instrument,
+    .cockpit__grid > .cockpit__instrument--tall {
+        width: 100%;
+        max-width: 320px;
+    }
+    .cockpit__center,
+    .cockpit__instrument--tall:last-child { /* EGT */
+        display: none;
+    }
+}
+/* Tablet: CAS + center, hide EGT */
+@media (min-width: 641px) and (max-width: 1024px) {
+    .cockpit__grid {
+        grid-template-columns: 1fr 1fr;
+    }
+    .cockpit__instrument--tall:last-child { /* EGT */
+        display: none;
+    }
 }

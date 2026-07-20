@@ -5,7 +5,8 @@
       "name": "preview",
       "runtimeExecutable": "go",
       "runtimeArgs": ["run", "./tmp/preview"],
-      "port": 8917
+      "port": 8917,
+      "autoPort": true
     }
   ]
 }
