@@ -271,29 +271,82 @@ td.descr .merchant-logo {
     text-align: center;
     opacity: 0.6;
 }
-/* Mobile: CAS only, centered in the plate */
+/* Right-panel carousel (BILLS / EGT) — desktop */
+.cockpit__right-carousel {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+.carousel-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 4px;
+}
+.carousel-tabs button,
+.mobile-tabs button {
+    flex: 1;
+    padding: 4px 0;
+    font-family: "B612 Mono", monospace;
+    font-size: 0.625rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    border: 1px solid var(--panel-edge, #333a44);
+    border-radius: 4px;
+    background: var(--panel, #1b1f26);
+    color: var(--chart-muted, #6a7280);
+    cursor: pointer;
+}
+.carousel-tabs button.active,
+.mobile-tabs button.active {
+    border-color: #2a5a2a;
+    background: #1a2a1a;
+    color: #4ade80;
+}
+.carousel-panel { display: none; }
+.carousel-panel.active { display: block; }
+/* Mobile tabs: hidden by default, shown only on mobile */
+.mobile-tabs { display: none; }
+.mobile-only { display: none; }
+/* Mobile: tab-switched panels */
 @media (max-width: 640px) {
     .cockpit { padding: 1rem; }
+    .mobile-tabs {
+        display: flex;
+        gap: 2px;
+        margin-bottom: 8px;
+    }
     .cockpit__grid {
         grid-template-columns: 1fr;
         justify-items: center;
     }
-    .cockpit__grid > .instrument,
-    .cockpit__grid > .cockpit__instrument--tall {
+    .cockpit__grid > .mobile-panel {
+        display: none;
         width: 100%;
         max-width: 320px;
     }
-    .cockpit__center,
-    .cockpit__instrument--tall:last-child { /* EGT */
-        display: none;
+    .cockpit__grid > .mobile-panel.active {
+        display: block;
+    }
+    /* On mobile, FMS panel loses its desktop carousel tabs */
+    .cockpit__right-carousel .carousel-tabs { display: none; }
+    /* Show only the bills panel in FMS tab, no inner toggling */
+    .cockpit__right-carousel .carousel-panel { display: block; }
+    .cockpit__right-carousel .carousel-panel[data-panel="egt"] { display: none; }
+    /* The mobile EGT tab shows its own dedicated panel */
+    .mobile-panel.mobile-only.active { display: block; }
+    /* Center instruments stack vertically within the gauge tab */
+    .cockpit__center.mobile-panel.active {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
     }
 }
-/* Tablet: CAS + center, hide EGT */
+/* Tablet: CAS + center, hide right carousel */
 @media (min-width: 641px) and (max-width: 1024px) {
     .cockpit__grid {
         grid-template-columns: 1fr 1fr;
     }
-    .cockpit__instrument--tall:last-child { /* EGT */
+    .cockpit__right-carousel {
         display: none;
     }
 }

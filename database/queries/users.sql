@@ -55,3 +55,9 @@ SELECT * FROM users WHERE api_key = ? AND active = 1;
 
 -- name: SetUserAPIKey :exec
 UPDATE users SET api_key = ? WHERE id = ?;
+
+-- name: SetUserIncome :exec
+UPDATE users SET pay_amount = ?, pay_day = ? WHERE id = ?;
+
+-- name: ClearUserIncome :exec
+UPDATE users SET pay_amount = NULL, pay_day = NULL WHERE id = ?;
