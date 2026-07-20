@@ -11,7 +11,7 @@ type CASPanelState struct {
 	Annunciator Annunciator
 
 	// Flight data.
-	Target    string  // daily budget allowance, e.g. "$46"
+	Target      string  // daily budget allowance, e.g. "$46"
 	Commit      string  // committed daily burn from spreads, e.g. "$18"
 	SpentToday  string  // swiped today (excluding committed), e.g. "$5"
 	TargetVal   float64 // numeric target for AVAIL computation
