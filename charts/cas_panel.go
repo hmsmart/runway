@@ -62,63 +62,106 @@ func CASPanelSVG(s CASPanelState) string {
 		casLamp(&b, x, y, lamp)
 	}
 
-	// ── Flight data: TARGET / COMMIT / AVAIL / G·S ─────────────────
-	b.WriteString(`<line x1="24" y1="160" x2="176" y2="160" class="cas-divider"/>`)
+	// ── Flight data: TARGET / G·S / COMMIT / SPENT / AVAIL ─────────
+	b.WriteString(`<line x1="24" y1="158" x2="176" y2="158" class="cas-divider"/>`)
 
 	// TARGET
-	b.WriteString(`<text x="24" y="178" class="cas-dme-lbl">TARGET</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="179" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Target))
+	b.WriteString(`<text x="24" y="176" class="cas-dme-lbl">TARGET</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="177" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Target))
+
+	// G/S — glideslope adjustment (sits right under TARGET as a modifier)
+	b.WriteString(`<text x="24" y="196" class="cas-dme-lbl">G/S</text>`)
+	if s.Reduction <= 0 {
+		b.WriteString(`<text x="176" y="197" text-anchor="end" class="cas-dme-val">OK</text>`)
+	} else {
+		gsColor := gaugeAmber
+		if s.Reduction > 10 {
+			gsColor = gaugeRed
+		}
+		fmt.Fprintf(&b, `<text x="176" y="197" text-anchor="end" class="cas-dme-val" style="fill:%s">−%s</text>`,
+			gsColor, esc(fmtCents(s.Reduction)))
+	}
 
 	// COMMIT
-	b.WriteString(`<text x="24" y="198" class="cas-dme-lbl">COMMIT</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="199" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Commit))
+	b.WriteString(`<text x="24" y="216" class="cas-dme-lbl">COMMIT</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="217" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Commit))
 
 	// SPENT
-	b.WriteString(`<text x="24" y="218" class="cas-dme-lbl">SPENT</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="219" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.SpentToday))
+	b.WriteString(`<text x="24" y="236" class="cas-dme-lbl">SPENT</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="237" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.SpentToday))
 
-	// AVAIL = TARGET - COMMIT - SPENT
-	avail := s.TargetVal - s.CommitVal - s.SpentTodVal
+	// AVAIL = TARGET - G/S - COMMIT - SPENT
+	avail := s.TargetVal - s.Reduction - s.CommitVal - s.SpentTodVal
 	availStr := fmtWhole(math.Max(avail, 0))
 	availColor := "#00ff88"
 	if avail <= 0 {
 		availColor = gaugeRed
 		availStr = "$0"
 	}
-	b.WriteString(`<text x="24" y="238" class="cas-dme-lbl">AVAIL</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="239" text-anchor="end" class="cas-dme-val" style="fill:%s">%s</text>`, availColor, esc(availStr))
+	b.WriteString(`<text x="24" y="256" class="cas-dme-lbl">AVAIL</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="257" text-anchor="end" class="cas-dme-val" style="fill:%s">%s</text>`, availColor, esc(availStr))
 
-	// G/S — glideslope status
-	b.WriteString(`<text x="24" y="258" class="cas-dme-lbl">G/S</text>`)
-	if s.Reduction <= 0 {
-		b.WriteString(`<text x="176" y="259" text-anchor="end" class="cas-dme-val">OK</text>`)
-	} else {
-		gsColor := gaugeAmber
-		if s.Reduction > 10 {
-			gsColor = gaugeRed
-		}
-		fmt.Fprintf(&b, `<text x="176" y="259" text-anchor="end" class="cas-dme-val" style="fill:%s">−%s</text>`,
-			gsColor, esc(fmtCents(s.Reduction)))
-	}
-
-	// ── Markers (O/M/I) ────────────────────────────────────────────
+	// ── Markers (O/M/I) with progress bar ──────────────────────────
 	b.WriteString(`<line x1="24" y1="270" x2="176" y2="270" class="cas-divider"/>`)
 
-	for i, m := range totMarkers {
-		cx := 42.0 + 58*float64(i)
-		cy := 292.0
+	const (
+		barL = 24.0
+		barR = 176.0
+		barY = 284.0
+		barH = 8.0
+	)
+	barW := barR - barL
+
+	// Progress bar track.
+	fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx="4" fill="#1a1e25" stroke="#262b33" stroke-width="0.5"/>`,
+		f(barL), f(barY), f(barW), f(barH))
+
+	// Filled portion, colored by which threshold is crossed.
+	if s.HasBudget && s.Consumed > 0 {
+		fillPct := clamp(s.Consumed, 0, 1.0)
+		fillW := barW * fillPct
+		fillColor := "#3f74c9" // blue (under O)
+		for _, m := range totMarkers {
+			if s.Consumed >= m.pct {
+				fillColor = m.color
+			}
+		}
+		if s.Consumed >= 1.0 {
+			fillColor = gaugeRed
+		}
+		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx="4" fill="%s" opacity="0.85"/>`,
+			f(barL), f(barY), f(fillW), f(barH), fillColor)
+	}
+
+	// O/M/I circle lamps below the bar with connecting lines.
+	const lampR = 8.0
+	lampCY := barY + barH + lampR + 4
+	for _, m := range totMarkers {
+		cx := barL + barW*m.pct
+		// White hairline from circle center up through the bar.
+		fmt.Fprintf(&b, `<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="#ffffff" stroke-width="0.5" opacity="0.3"/>`,
+			f(cx), f(lampCY-lampR), f(cx), f(barY))
 		lit := s.HasBudget && s.Consumed >= m.pct
 		if lit {
-			fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="10" fill="%s"/>`, f(cx), f(cy), m.color)
-			fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="10" font-weight="700" style="fill:#fff">%s</text>`, f(cx), f(cy+4), m.letter)
+			fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="%s"/>`, f(cx), f(lampCY), f(lampR), m.color)
+			fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="8" font-weight="700" style="fill:#fff">%s</text>`, f(cx), f(lampCY+3), m.letter)
 		} else {
-			fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="10" fill="#1a1e25" stroke="#262b33" stroke-width="1.5"/>`, f(cx), f(cy))
-			fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="10" font-weight="700" style="fill:#333a44">%s</text>`, f(cx), f(cy+4), m.letter)
+			fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="#1a1e25" stroke="#262b33" stroke-width="1.5"/>`, f(cx), f(lampCY), f(lampR))
+			fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="8" font-weight="700" style="fill:#333a44">%s</text>`, f(cx), f(lampCY+3), m.letter)
 		}
-		fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="middle" font-size="6" style="fill:#5a6270">%.0f%%</text>`, f(cx), f(cy+16), m.pct*100)
 	}
+
+	// Percentage readout follows the fill edge.
 	if s.HasBudget {
-		fmt.Fprintf(&b, `<text x="176" y="282" text-anchor="end" font-size="7" style="fill:#5a6270;font-family:'B612 Mono',monospace;letter-spacing:1px">%.0f%%</text>`, s.Consumed*100)
+		pctX := barL + barW*clamp(s.Consumed, 0, 1.0)
+		anchor := "middle"
+		if pctX < barL+14 {
+			anchor = "start"
+		} else if pctX > barR-14 {
+			anchor = "end"
+		}
+		fmt.Fprintf(&b, `<text x="%s" y="%s" text-anchor="%s" font-size="7" style="fill:#8891a0;font-family:'B612 Mono',monospace;letter-spacing:1px">%.0f%%</text>`,
+			f(pctX), f(barY-2), anchor, s.Consumed*100)
 	}
 
 	// ── Fuel strip ─────────────────────────────────────────────────
@@ -132,16 +175,16 @@ func CASPanelSVG(s CASPanelState) string {
 	)
 	stripW := stripR - stripL
 
-	b.WriteString(`<line x1="24" y1="318" x2="176" y2="318" class="cas-divider"/>`)
+	b.WriteString(`<line x1="24" y1="330" x2="176" y2="330" class="cas-divider"/>`)
 
 	if s.HasFuel {
 		daysLabel := fuelReadout(s.Days14)
 		fuelColor := casFuelColor(s.Days14)
-		fmt.Fprintf(&b, `<text x="%s" y="334" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
-		fmt.Fprintf(&b, `<text x="%s" y="334" text-anchor="end" class="cas-fuel-val" style="fill:%s">%s<tspan font-size="8" font-weight="600"> DAYS</tspan></text>`,
+		fmt.Fprintf(&b, `<text x="%s" y="342" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
+		fmt.Fprintf(&b, `<text x="%s" y="342" text-anchor="end" class="cas-fuel-val" style="fill:%s">%s<tspan font-size="8" font-weight="600"> DAYS</tspan></text>`,
 			f(stripR), fuelColor, esc(daysLabel))
 
-		sy := 340.0
+		sy := 350.0
 		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx="2" class="cas-strip"/>`,
 			f(stripL), f(sy), f(stripW), f(stripH))
 		redW := stripW * (fuelRed / fuelFull)
@@ -167,8 +210,8 @@ func CASPanelSVG(s CASPanelState) string {
 		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="3" height="%s" rx="1.5" fill="%s"/>`,
 			f(needleX-1.5), f(sy+1.5), f(stripH-3), fuelColor)
 	} else {
-		fmt.Fprintf(&b, `<text x="%s" y="334" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
-		fmt.Fprintf(&b, `<text x="%s" y="334" text-anchor="end" font-size="11" font-weight="700" style="fill:%s;font-family:'B612 Mono',monospace;letter-spacing:0.14em">INOP</text>`,
+		fmt.Fprintf(&b, `<text x="%s" y="342" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
+		fmt.Fprintf(&b, `<text x="%s" y="342" text-anchor="end" font-size="11" font-weight="700" style="fill:%s;font-family:'B612 Mono',monospace;letter-spacing:0.14em">INOP</text>`,
 			f(stripR), gaugeRed)
 	}
 

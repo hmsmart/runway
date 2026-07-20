@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -183,27 +184,8 @@ func (t *TelegramBot) buildRunwayReport(ctx context.Context, userID string) (str
 	if err != nil {
 		return "", fmt.Errorf("list tracked accounts: %w", err)
 	}
-	u, err := t.store.GetUserByID(ctx, userID)
-	if err != nil {
-		return "", fmt.Errorf("load user: %w", err)
-	}
-	txs, err := t.store.ListSpendTransactionsByUser(ctx, userID)
-	if err != nil {
-		return "", fmt.Errorf("list spend transactions: %w", err)
-	}
-	committed := todaysCommitments(txs, now.Format(time.DateOnly))
-	// Today's row always exists once there's any history (the recompute
-	// materializes every day through today), but tolerate its absence.
-	var todaySpend float64
-	if todayRow, err := t.store.GetDailySpendDay(ctx, sqlcgen.GetDailySpendDayParams{
-		UserID: userID,
-		Date:   now.Format(time.DateOnly),
-	}); err == nil {
-		todaySpend = todayRow.Spend
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("load today's spend: %w", err)
-	}
-	return formatRunwayMessage(day, accounts, u.DiscretionaryMonthly, committed, todaySpend, spendLabel, now), nil
+	db := computeDailyBudget(ctx, t.store, userID)
+	return formatRunwayMessage(day, accounts, db, spendLabel, now), nil
 }
 
 // todaysCommitments sums the slices of spread transactions whose amort window
@@ -232,6 +214,86 @@ func todaysCommitments(txs []sqlcgen.ListSpendTransactionsByUserRow, today strin
 	return total
 }
 
+// dailyBudget is the single source of truth for today's budget state. Every
+// consumer — CAS panel, /runway report, threshold notifications — derives
+// from this so the numbers never diverge.
+type dailyBudget struct {
+	Allowance  float64 // monthly / daysInMonth — the flat daily target
+	Committed  float64 // spread-tx slices touching today
+	Spent      float64 // discretionary spend today (total minus committed)
+	Correction float64 // max(EMA14 - remainingBudget/daysLeft, 0)
+	Available  float64 // Allowance - Committed - Spent - Correction
+	Consumed   float64 // fraction of Allowance consumed (0..∞)
+	HasBudget  bool
+}
+
+func computeDailyBudget(ctx context.Context, store *database.Store, userID string) dailyBudget {
+	now := time.Now()
+	today := now.Format(time.DateOnly)
+
+	userRow, err := store.GetUserByID(ctx, userID)
+	if err != nil || userRow.DiscretionaryMonthly == nil || *userRow.DiscretionaryMonthly <= 0 {
+		return dailyBudget{}
+	}
+	monthly := *userRow.DiscretionaryMonthly
+	allowance := monthly / float64(daysInMonth(now))
+
+	var todaySpend float64
+	if todayRow, err := store.GetDailySpendDay(ctx, sqlcgen.GetDailySpendDayParams{
+		UserID: userID,
+		Date:   today,
+	}); err == nil {
+		todaySpend = todayRow.Spend
+	}
+
+	var commitDaily float64
+	if txs, err := store.ListSpendTransactionsByUser(ctx, userID); err == nil {
+		commitDaily = todaysCommitments(txs, today)
+	}
+
+	spent := math.Max(todaySpend-commitDaily, 0)
+
+	reduction := 0.0
+	if dailies, err := loadDailies(ctx, store, userID); err == nil {
+		if s, err := snapshotEMAs(dailies, "budget"); err == nil {
+			burnMTD := monthToDateSpend(dailies, now)
+			daysLeft := max(daysInMonth(now)-now.Day()+1, 1)
+			remainingBudget := math.Max(monthly-burnMTD, 0)
+
+			// The binding constraint is the tighter of the budget
+			// remaining and the cash on hand — can't spend money that
+			// isn't there even if the budget says you could.
+			effective := remainingBudget
+			if accounts, err := store.ListTrackedAccountsByUser(ctx, userID); err == nil {
+				cash, owed := cashOnHand(accounts)
+				net := cash - owed
+				if net >= 0 && net < effective {
+					effective = net
+				}
+			}
+
+			adjustedDaily := effective / float64(daysLeft)
+			reduction = math.Max(s.E14-adjustedDaily, 0)
+		}
+	}
+
+	available := allowance - commitDaily - spent - reduction
+	consumed := 0.0
+	if allowance > 0 {
+		consumed = (commitDaily + spent + reduction) / allowance
+	}
+
+	return dailyBudget{
+		Allowance:  allowance,
+		Committed:  commitDaily,
+		Spent:      spent,
+		Correction: reduction,
+		Available:  available,
+		Consumed:   consumed,
+		HasBudget:  true,
+	}
+}
+
 func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *models.Update) {
 	user := domains.UserFromContext(ctx)
 	chatID := update.Message.Chat.ID
@@ -258,7 +320,7 @@ func (t *TelegramBot) handleRunway(ctx context.Context, b *bot.Bot, update *mode
 // preferred, since that's what's actually spendable) minus credit-card
 // balances owed: cards are spend that hasn't left checking yet, so ignoring
 // them would overstate the runway.
-func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, budget *float64, committed, todaySpend float64, spendLabel string, now time.Time) string {
+func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, db dailyBudget, spendLabel string, now time.Time) string {
 	cash, owed := cashOnHand(accounts)
 	net := cash - owed
 	netStr := formatDollarsCents(net)
@@ -266,33 +328,22 @@ func formatRunwayMessage(day sqlcgen.DailySpend, accounts []sqlcgen.Account, bud
 		netStr = "-" + formatDollarsCents(-net)
 	}
 
-	// A tail (trend marker or landing date) hangs off the value column so it
-	// never disturbs the alignment; an empty label renders as a group
-	// separator. Each trend compares a rate to the next-longer horizon —
-	// spend vs 14d, 14d vs 28d, 28d vs 84d — so red means spending is
-	// running hotter than its longer-term baseline.
 	type row struct{ label, value, tail string }
 	var rows []row
-	if budget != nil {
-		// Days in the whole month, not days remaining: the allowance is a
-		// steady daily figure, not a pace-corrected one.
-		daysInMonth := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, now.Location()).Day()
-		allowance := *budget / float64(daysInMonth)
-		// Today's series row already folds in the amort slices, so subtracting
-		// committed leaves just what was actually swiped today. Clamp: float
-		// drift could otherwise show a tiny negative.
-		spent := max(todaySpend-committed, 0)
-		available := allowance - committed - spent
-		rows = append(rows, row{"Allowance", formatDollarsCents(allowance), ""})
-		if committed > 0 {
-			rows = append(rows, row{"Commitments", "-" + formatDollarsCents(committed), ""})
+	if db.HasBudget {
+		rows = append(rows, row{"Allowance", formatDollarsCents(db.Allowance), ""})
+		if db.Committed > 0 {
+			rows = append(rows, row{"Commitments", "-" + formatDollarsCents(db.Committed), ""})
 		}
-		if spent > 0 {
-			rows = append(rows, row{"Spent today", "-" + formatDollarsCents(spent), ""})
+		if db.Spent > 0 {
+			rows = append(rows, row{"Spent today", "-" + formatDollarsCents(db.Spent), ""})
 		}
-		availableStr := formatDollarsCents(available)
-		if available < 0 {
-			availableStr = "-" + formatDollarsCents(-available)
+		if db.Correction > 0 {
+			rows = append(rows, row{"Correction", "-" + formatDollarsCents(db.Correction), ""})
+		}
+		availableStr := formatDollarsCents(db.Available)
+		if db.Available < 0 {
+			availableStr = "-" + formatDollarsCents(-db.Available)
 		}
 		rows = append(rows,
 			row{"Available", availableStr, ""},

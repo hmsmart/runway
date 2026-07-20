@@ -99,7 +99,7 @@ func ComputeAnnunciator(
 	ema14Prev, ema28Prev float64,
 	daysLeft int, remainingBudget float64,
 	syncOK bool,
-	fuelLow bool,
+	fuelWarn, fuelLow bool,
 ) Annunciator {
 	a := Annunciator{
 		Lamp14:   computeLamp("EMA-14", ema14, ema14Prev, targetDaily),
@@ -112,6 +112,8 @@ func ComputeAnnunciator(
 	}
 	if fuelLow {
 		a.LampFuel = Lamp{Label: "FUEL", State: LampOver, Value: "LOW"}
+	} else if fuelWarn {
+		a.LampFuel = Lamp{Label: "FUEL", State: LampWarn, Value: "WARN"}
 	}
 
 	// Show spend reduction targets if either lamp is OVER or WARN.

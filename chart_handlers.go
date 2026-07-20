@@ -392,52 +392,40 @@ func handleGaugeCAS(store *database.Store) http.HandlerFunc {
 
 		now := time.Now()
 		burnMTD := monthToDateSpend(dailies, now)
-		targetDaily := s.Target
+		db := computeDailyBudget(r.Context(), store, userID)
+		targetDaily := db.Allowance
 		daysLeft := 0
 		remainingBudget := 0.0
-		hasBudget := false
+		fuelWarn := false
 		fuelLow := false
 		consumed := 0.0
-		reduction := 0.0
 
-		if userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0 {
-			hasBudget = true
+		if db.HasBudget {
 			monthly := *userRow.DiscretionaryMonthly
 			daysLeft = max(daysInMonth(now)-now.Day()+1, 1)
 			remainingBudget = max(monthly-burnMTD, 0)
 			consumed = burnMTD / monthly
-			if targetDaily <= 0 {
-				targetDaily = monthly / float64(daysInMonth(now))
-			}
 			if daysLeft > 0 && remainingBudget/float64(daysLeft) < s.E14*0.5 {
 				fuelLow = true
 			}
 			if remainingBudget <= 0 {
 				fuelLow = true
 			}
-			adjustedDaily := remainingBudget / float64(daysLeft)
-			reduction = math.Max(s.E14-adjustedDaily, 0)
+			cash, owed := cashOnHand(accounts)
+			net := cash - owed
+			if net > 0 && s.E14 > 0 && runwayFuelDays(net, s.E14) < float64(daysLeft) {
+				fuelWarn = true
+			}
+		} else if s.Target > 0 {
+			targetDaily = s.Target
 		}
 
 		annState := charts.ComputeAnnunciator(
 			targetDaily, s.E14, s.E28,
 			s.PrevE14, s.PrevE28,
 			daysLeft, remainingBudget,
-			syncFresh(accounts), fuelLow,
+			syncFresh(accounts), fuelWarn, fuelLow,
 		)
-
-		// COMMIT: today's spread-transaction slices already promised.
-		commitDaily := 0.0
-		spentToday := 0.0
-		if txs, err := store.ListSpendTransactionsByUser(r.Context(), userID); err == nil {
-			commitDaily = todaysCommitments(txs, now.Format(time.DateOnly))
-		}
-		if todayRow, err := store.GetDailySpendDay(r.Context(), sqlcgen.GetDailySpendDayParams{
-			UserID: userID,
-			Date:   now.Format(time.DateOnly),
-		}); err == nil {
-			spentToday = math.Max(todayRow.Spend-commitDaily, 0)
-		}
 
 		cash, owed := cashOnHand(accounts)
 		net := cash - owed
@@ -451,14 +439,14 @@ func handleGaugeCAS(store *database.Store) http.HandlerFunc {
 
 		state := charts.CASPanelState{
 			Annunciator: annState,
-			Target:      formatDollars(math.Round(targetDaily)),
-			Commit:      formatDollarsCents(commitDaily),
-			SpentToday:  formatDollarsCents(spentToday),
-			TargetVal:   targetDaily,
-			CommitVal:   commitDaily,
-			SpentTodVal: spentToday,
-			Reduction:   reduction,
-			HasBudget:   hasBudget,
+			Target:      formatDollars(math.Round(db.Allowance)),
+			Commit:      formatDollarsCents(db.Committed),
+			SpentToday:  formatDollarsCents(db.Spent),
+			TargetVal:   db.Allowance,
+			CommitVal:   db.Committed,
+			SpentTodVal: db.Spent,
+			Reduction:   db.Correction,
+			HasBudget:   db.HasBudget,
 			Consumed:    consumed,
 			HasFuel:     hasFuel,
 			Days14:      days14,
