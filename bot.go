@@ -53,7 +53,8 @@ type TelegramBot struct {
 	runCtx context.Context
 	// drains maps chat ID -> kick channel (buffered, size 1) for that
 	// chat's drain worker. Workers spawn lazily and park forever.
-	drains sync.Map
+	drains     sync.Map
+	thresholds *thresholdTracker
 }
 
 func NewTelegramBot(ctx context.Context, cfg *Config, store *database.Store, plaidClient *plaid.APIClient) (*TelegramBot, error) {
@@ -61,7 +62,7 @@ func NewTelegramBot(ctx context.Context, cfg *Config, store *database.Store, pla
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
-	return &TelegramBot{bot: b, cfg: cfg, store: store, plaid: plaidClient, runCtx: ctx}, nil
+	return &TelegramBot{bot: b, cfg: cfg, store: store, plaid: plaidClient, runCtx: ctx, thresholds: newThresholdTracker()}, nil
 }
 
 // middleware wraps a handler with one cross-cutting step.
@@ -1108,6 +1109,9 @@ func (t *TelegramBot) drainChat(ctx context.Context, chatID int64) {
 			return
 		}
 		if len(rows) == 0 {
+			if announced {
+				t.checkSpendThresholdsForChat(ctx, chatID)
+			}
 			return
 		}
 		if !announced {

@@ -84,6 +84,9 @@ func handleHoldWebhook(store *database.Store, cfg *Config, tg *TelegramBot) http
 		}
 
 		slog.Info("hold webhook: created hold", "user", u.ID(), "tx", txID, "amt", amt, "merchant", merchant, "name", payload.Name, "cardpass", payload.CardPass)
+		if err := recomputeDailySpend(r.Context(), store, u.ID()); err != nil {
+			slog.Error("hold webhook: failed to recompute daily spend", "user", u.ID(), "err", err)
+		}
 		tg.startDrain(u.TelegramID())
 		w.WriteHeader(http.StatusOK)
 	}
