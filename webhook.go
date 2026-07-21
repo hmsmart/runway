@@ -74,6 +74,10 @@ func handlePlaidWebhook(plaidClient *plaid.APIClient, store *database.Store, cfg
 			return
 		}
 
+		if strings.HasPrefix(hook.ItemID, "seed:") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		item, err := store.GetItemByID(r.Context(), hook.ItemID)
 		if err != nil {
 			slog.Error("webhook for unknown item", "item", hook.ItemID, "err", err)

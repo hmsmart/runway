@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,7 +25,12 @@ import (
 var staticFiles embed.FS
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	logFile, err := os.OpenFile("runway.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal("open runway.log:", err)
+	}
+	defer logFile.Close()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stdout, logFile), &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})))
 
@@ -122,6 +129,7 @@ func run(ctx context.Context) error {
 	mux.Handle("GET /gauge/cas", requireSession(handleGaugeCAS(store)))
 	mux.Handle("GET /gauge/fuel", requireSession(handleGaugeFuel(store)))
 	mux.Handle("GET /gauge/egt", requireSession(handleGaugeEGT(store)))
+	mux.Handle("GET /gauge/fms-bills", requireSession(handleGaugeFMSBills(store)))
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
 	mux.Handle("POST /hook/hold", handleHoldWebhook(store, cfg, tg))
@@ -174,6 +182,9 @@ func run(ctx context.Context) error {
 			return
 		}
 		for _, item := range items {
+			if strings.HasPrefix(item.ItemID, "seed:") {
+				continue
+			}
 			accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
 			if err != nil {
 				slog.Error("failed to decrypt access token", "item", item.ItemID, "err", err)

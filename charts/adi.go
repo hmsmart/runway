@@ -14,6 +14,7 @@ type ADIState struct {
 	HasBudget  bool
 	DevDays    float64
 	DevDollars float64
+	FuelWarn   bool
 }
 
 type ADITick struct {
@@ -29,12 +30,21 @@ func (t ADITick) Fill() string {
 	return "rgba(255,170,160,0.85)"
 }
 
-func ComputeADI(targetDaily, ema14, ema28, burnMTD float64, hasBudget bool, devDays, devDollars float64) ADIState {
+func ComputeADI(targetDaily, ema14, ema28, burnMTD float64, hasBudget bool, devDays, devDollars, fuelDays float64, daysLeft int) ADIState {
 	if targetDaily <= 0 {
 		targetDaily = 1
 	}
 	ratio := (targetDaily - ema14) / targetDaily
 	pitch := clamp(ratio*55, -45, 45)
+
+	fuelWarn := false
+	if fuelDays > 0 && daysLeft > 0 && fuelDays < float64(daysLeft) {
+		fuelWarn = true
+		fuelDeficit := (float64(daysLeft) - fuelDays) / float64(daysLeft)
+		pullDown := clamp(fuelDeficit*40, 0, 30)
+		pitch = clamp(pitch-pullDown, -45, 45)
+	}
+
 	return ADIState{
 		Pitch:      pitch,
 		BurnMTD:    formatUSD(burnMTD),
@@ -42,6 +52,7 @@ func ComputeADI(targetDaily, ema14, ema28, burnMTD float64, hasBudget bool, devD
 		HasBudget:  hasBudget,
 		DevDays:    devDays,
 		DevDollars: devDollars,
+		FuelWarn:   fuelWarn,
 	}
 }
 
@@ -121,10 +132,16 @@ func ADI(state ADIState) string {
 		fmt.Fprintf(&b, `<text x="100" y="%s" text-anchor="middle" font-size="10" font-weight="700" fill="#fff" letter-spacing="0.14em">NAV</text>`, f(locY+4))
 	}
 
-	// Fixed aircraft reticle.
-	b.WriteString(`<line x1="28" y1="100" x2="70" y2="100" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round"/>`)
-	b.WriteString(`<line x1="130" y1="100" x2="172" y2="100" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round"/>`)
-	b.WriteString(`<circle cx="100" cy="100" r="4.5" fill="none" stroke="#ff8c00" stroke-width="2.5"/>`)
+	// FUEL warning flag — top-right on the bezel when runway days < days left.
+	if state.FuelWarn {
+		b.WriteString(`<rect x="136" y="10" width="38" height="16" rx="3" fill="var(--lamp-warn,#fdf3e0)" stroke="var(--lamp-warn-edge,#d99114)" stroke-width="1.2"/>`)
+		b.WriteString(`<text x="155" y="22" text-anchor="middle" font-family="'B612 Mono',monospace" font-size="8" font-weight="700" fill="var(--lamp-warn-edge,#d99114)" letter-spacing="0.1em">FUEL</text>`)
+	}
+
+	// Fixed aircraft reticle — V-shape chevron with flat wing tips.
+	b.WriteString(`<polyline points="30,100 55,100 100,118" fill="none" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`)
+	b.WriteString(`<polyline points="170,100 145,100 100,118" fill="none" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`)
+	b.WriteString(`<circle cx="100" cy="106" r="4" fill="#ff8c00"/>`)
 
 	// Readout boxes — bottom center, side by side.
 	burnFill := "#00ff88"

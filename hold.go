@@ -18,7 +18,7 @@ import (
 )
 
 type holdPayload struct {
-	Amount   string `json:"Amount"`
+	Amount   any    `json:"Amount"`
 	Merchant string `json:"Merchant"`
 	Name     string `json:"Name"`
 	CardPass string `json:"CardPass"`
@@ -33,6 +33,14 @@ func handleHoldWebhook(store *database.Store, cfg *Config, tg *TelegramBot) http
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+
+		slog.Debug("hold webhook: raw request",
+			"for", ip,
+			"method", r.Method,
+			"content-type", r.Header.Get("Content-Type"),
+			"body", string(body),
+			"url", r.URL.String(),
+		)
 
 		var payload holdPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -61,7 +69,7 @@ func handleHoldWebhook(store *database.Store, cfg *Config, tg *TelegramBot) http
 			return
 		}
 
-		amt, err := parseHoldAmount(payload.Amount)
+		amt, err := parseHoldAmount(fmt.Sprint(payload.Amount))
 		if err != nil {
 			slog.Warn("hold webhook: bad amount", "for", ip, "raw", payload.Amount, "err", err)
 			http.Error(w, "bad amount", http.StatusBadRequest)

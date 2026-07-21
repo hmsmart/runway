@@ -10,6 +10,15 @@ import (
 	"database/sql"
 )
 
+const clearUserIncome = `-- name: ClearUserIncome :exec
+UPDATE users SET pay_amount = NULL, pay_day = NULL WHERE id = ?
+`
+
+func (q *Queries) ClearUserIncome(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, clearUserIncome, id)
+	return err
+}
+
 const createInviteCode = `-- name: CreateInviteCode :exec
 INSERT INTO users (
     id,
@@ -46,7 +55,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id string) error {
 }
 
 const getUserByAPIKey = `-- name: GetUserByAPIKey :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key FROM users WHERE api_key = ? AND active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key, pay_amount, pay_day FROM users WHERE api_key = ? AND active = 1
 `
 
 func (q *Queries) GetUserByAPIKey(ctx context.Context, apiKey *string) (User, error) {
@@ -65,12 +74,14 @@ func (q *Queries) GetUserByAPIKey(ctx context.Context, apiKey *string) (User, er
 		&i.ReportTime,
 		&i.ReportSentOn,
 		&i.ApiKey,
+		&i.PayAmount,
+		&i.PayDay,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key FROM users WHERE id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key, pay_amount, pay_day FROM users WHERE id = ? and active = 1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -89,12 +100,14 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.ReportTime,
 		&i.ReportSentOn,
 		&i.ApiKey,
+		&i.PayAmount,
+		&i.PayDay,
 	)
 	return i, err
 }
 
 const getUserByTelegram = `-- name: GetUserByTelegram :one
-SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key FROM users WHERE tg_id = ? and active = 1
+SELECT id, tg_id, tg_username, tg_first_name, invite_code, can_invite, active, created_at, discretionary_monthly, report_time, report_sent_on, api_key, pay_amount, pay_day FROM users WHERE tg_id = ? and active = 1
 `
 
 func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, error) {
@@ -113,6 +126,8 @@ func (q *Queries) GetUserByTelegram(ctx context.Context, tgID *int64) (User, err
 		&i.ReportTime,
 		&i.ReportSentOn,
 		&i.ApiKey,
+		&i.PayAmount,
+		&i.PayDay,
 	)
 	return i, err
 }
@@ -258,5 +273,20 @@ type SetUserAPIKeyParams struct {
 
 func (q *Queries) SetUserAPIKey(ctx context.Context, arg SetUserAPIKeyParams) error {
 	_, err := q.db.ExecContext(ctx, setUserAPIKey, arg.ApiKey, arg.ID)
+	return err
+}
+
+const setUserIncome = `-- name: SetUserIncome :exec
+UPDATE users SET pay_amount = ?, pay_day = ? WHERE id = ?
+`
+
+type SetUserIncomeParams struct {
+	PayAmount *float64 `json:"pay_amount"`
+	PayDay    *int64   `json:"pay_day"`
+	ID        string   `json:"id"`
+}
+
+func (q *Queries) SetUserIncome(ctx context.Context, arg SetUserIncomeParams) error {
+	_, err := q.db.ExecContext(ctx, setUserIncome, arg.PayAmount, arg.PayDay, arg.ID)
 	return err
 }

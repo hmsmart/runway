@@ -9,14 +9,56 @@ templ DashboardPage(name string) {
             <p>your runway at a glance</p>
         </hgroup>
         <div class="cockpit">
+            <div class="mobile-tabs">
+                <button class="active" onclick="switchMobile('cas')">CAS</button>
+                <button onclick="switchMobile('gauge')">GAUGE</button>
+                <button onclick="switchMobile('fms')">FMS</button>
+                <button onclick="switchMobile('egt')">EGT</button>
+            </div>
             <div class="cockpit__grid">
-                @instrumentTall("/gauge/cas", "cas · status")
-                <div class="cockpit__center">
+                <div class="mobile-panel active" data-mobile="cas">
+                    @instrumentTall("/gauge/cas", "cas · status")
+                </div>
+                <div class="cockpit__center mobile-panel" data-mobile="gauge">
                     @instrument("/gauge/adi", "adi · attitude + deviation")
                     @instrument("/gauge/vsi", "vsi · runway days trend")
                 </div>
-                @instrumentTall("/gauge/egt", "egt · category heat")
+                <div class="cockpit__right-carousel mobile-panel" data-mobile="fms">
+                    <div class="carousel-tabs">
+                        <button class="active" onclick="switchPanel('bills')">BILLS</button>
+                        <button onclick="switchPanel('egt')">EGT</button>
+                    </div>
+                    <div class="carousel-panels">
+                        <div class="carousel-panel active" data-panel="bills">
+                            @instrumentTall("/gauge/fms-bills", "fms · bills")
+                        </div>
+                        <div class="carousel-panel" data-panel="egt">
+                            @instrumentTall("/gauge/egt", "egt · category heat")
+                        </div>
+                    </div>
+                </div>
+                <div class="mobile-panel mobile-only" data-mobile="egt">
+                    @instrumentTall("/gauge/egt", "egt · category heat")
+                </div>
             </div>
+            <script>
+            function switchPanel(name) {
+                document.querySelectorAll('.carousel-panel').forEach(p => {
+                    p.classList.toggle('active', p.dataset.panel === name);
+                });
+                document.querySelectorAll('.carousel-tabs button').forEach(b => {
+                    b.classList.toggle('active', b.textContent.trim().toLowerCase() === name);
+                });
+            }
+            function switchMobile(name) {
+                document.querySelectorAll('.mobile-panel').forEach(p => {
+                    p.classList.toggle('active', p.dataset.mobile === name);
+                });
+                document.querySelectorAll('.mobile-tabs button').forEach(b => {
+                    b.classList.toggle('active', b.textContent.trim().toLowerCase() === name);
+                });
+            }
+            </script>
         </div>
     }
 }

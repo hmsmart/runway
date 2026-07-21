@@ -353,6 +353,7 @@ func handleGaugeADI(store *database.Store) http.HandlerFunc {
 
 		targetDaily := s.Target
 		hasBudget := userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0
+		daysLeft := max(daysInMonth(now)-now.Day()+1, 1)
 		var devDays, devDollars float64
 		if hasBudget {
 			dailyAllowance := *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
@@ -366,7 +367,18 @@ func handleGaugeADI(store *database.Store) http.HandlerFunc {
 			}
 		}
 
-		state := charts.ComputeADI(targetDaily, s.E14, s.E28, burnMTD, hasBudget, devDays, devDollars)
+		accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
+		if err != nil {
+			return "", err
+		}
+		cash, owed := cashOnHand(accounts)
+		net := cash - owed
+		var fuelDays float64
+		if net > 0 && s.E14 > 0 {
+			fuelDays = runwayFuelDays(net, s.E14)
+		}
+
+		state := charts.ComputeADI(targetDaily, s.E14, s.E28, burnMTD, hasBudget, devDays, devDollars, fuelDays, daysLeft)
 		return charts.ADI(state), nil
 	})
 }
@@ -514,4 +526,58 @@ func handleGaugeEGT(store *database.Store) http.HandlerFunc {
 		}
 		return charts.EGTPanel(cats), nil
 	})
+}
+
+func handleGaugeFMSBills(store *database.Store) http.HandlerFunc {
+	return chartHandler(func(r *http.Request, userID string) (string, error) {
+		rows, err := store.ListActiveBillsByUser(r.Context(), userID)
+		if err != nil {
+			return "", fmt.Errorf("list bills: %w", err)
+		}
+
+		now := time.Now()
+		var bills []charts.Bill
+		for _, row := range rows {
+			bills = append(bills, charts.Bill{
+				Name:    row.Name,
+				Amount:  row.Amount,
+				DaysOut: daysUntilDayOfMonth(now, int(row.DayOfMonth)),
+			})
+		}
+
+		accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
+		if err != nil {
+			return "", fmt.Errorf("list accounts: %w", err)
+		}
+		cash, owed := cashOnHand(accounts)
+		net := math.Max(cash-owed, 0)
+
+		userRow, err := store.GetUserByID(r.Context(), userID)
+		if err != nil {
+			return "", fmt.Errorf("get user: %w", err)
+		}
+		payAmount := 0.0
+		payDay := 0
+		if userRow.PayAmount != nil && userRow.PayDay != nil {
+			payAmount = *userRow.PayAmount
+			payDay = daysUntilDayOfMonth(now, int(*userRow.PayDay))
+		}
+
+		state := charts.FMSBillsState{
+			Bills:      bills,
+			CashOnHand: net,
+			PayAmount:  payAmount,
+			PayDay:     payDay,
+		}
+		return charts.FMSBillsSVG(state), nil
+	})
+}
+
+func daysUntilDayOfMonth(now time.Time, dayOfMonth int) int {
+	today := now.Day()
+	if dayOfMonth >= today {
+		return dayOfMonth - today
+	}
+	nextMonth := time.Date(now.Year(), now.Month()+1, dayOfMonth, 0, 0, 0, 0, now.Location())
+	return int(nextMonth.Sub(now).Hours()/24) + 1
 }

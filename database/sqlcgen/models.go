@@ -24,6 +24,16 @@ type Account struct {
 	Tracked          int64      `json:"tracked"`
 }
 
+type Bill struct {
+	ID         string    `json:"id"`
+	UserID     string    `json:"user_id"`
+	Name       string    `json:"name"`
+	Amount     float64   `json:"amount"`
+	DayOfMonth int64     `json:"day_of_month"`
+	Active     int64     `json:"active"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 type DailySpend struct {
 	Date   string   `json:"date"`
 	UserID string   `json:"user_id"`
@@ -82,4 +92,6 @@ type User struct {
 	ReportTime           *string   `json:"report_time"`
 	ReportSentOn         *string   `json:"report_sent_on"`
 	ApiKey               *string   `json:"api_key"`
+	PayAmount            *float64  `json:"pay_amount"`
+	PayDay               *int64    `json:"pay_day"`
 }

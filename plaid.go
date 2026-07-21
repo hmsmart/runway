@@ -147,7 +147,10 @@ func persistTransactionsPage(ctx context.Context, itemID string, resp plaid.Tran
 			}
 			// Adopt an iOS-shortcut hold: same user, same amount,
 			// cross-account (holds live on the manual account).
-			if !tx.GetPending() {
+			// Runs for both pending and settled Plaid transactions:
+			// Plaid's first signal is usually a pending, and holds
+			// exist precisely to bridge that gap.
+			{
 				res, err := q.AdoptHoldByAmount(ctx, holdAdoptParams(params, userID))
 				if err != nil {
 					return fmt.Errorf("adopt hold for %s: %w", params.PlaidTxID, err)

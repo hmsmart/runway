@@ -274,6 +274,13 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleUnlinkCallback, t.fetchUser, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "unreg:", bot.MatchTypePrefix,
 		chain(t.handleUnregisterCallback, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeCallbackQueryData, "recur:", bot.MatchTypePrefix,
+		chain(t.handleRecurring, t.fetchUser, t.requirePermission(domains.PermissionActive)))
+
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/bill", bot.MatchTypePrefix,
+		chain(t.handleBill, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/income", bot.MatchTypePrefix,
+		chain(t.handleIncome, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 }
 
 func (t *TelegramBot) handleStart(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -729,6 +736,222 @@ func (t *TelegramBot) handleInvite(ctx context.Context, b *bot.Bot, update *mode
 	t.sendText(ctx, b, update.Message.Chat.ID,
 		fmt.Sprintf("Invite created! Share this invite code with your friend: <code>%s</code>\nThey can redeem it by sending me <code>/register %s</code>", inviteCode, inviteCode))
 }
+func (t *TelegramBot) handleBill(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	raw := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/bill"))
+
+	if raw == "" || raw == "list" {
+		bills, err := t.store.ListActiveBillsByUser(ctx, user.ID())
+		if err != nil {
+			slog.Error("failed to list bills", "chatID", chatID, "err", err)
+			t.sendText(ctx, b, chatID, errTryLater)
+			return
+		}
+		if len(bills) == 0 {
+			t.sendText(ctx, b, chatID,
+				"No recurring bills configured.\n\n"+
+					"Add one with <code>/bill add NAME AMOUNT DAY</code>\n"+
+					"e.g. <code>/bill add RENT 1850 3</code>\n\n"+
+					"Or tap ♻️ on a transaction notification to tag it as recurring.")
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("<b>Recurring Bills</b>\n\n")
+		total := 0.0
+		for _, bill := range bills {
+			total += bill.Amount
+			fmt.Fprintf(&sb, "  %s — %s on the %s\n",
+				html.EscapeString(bill.Name), formatDollarsCents(bill.Amount), ordinal(int(bill.DayOfMonth)))
+		}
+		fmt.Fprintf(&sb, "\n<b>Total:</b> %s/mo", formatDollarsCents(total))
+		t.sendText(ctx, b, chatID, sb.String())
+		return
+	}
+
+	parts := strings.Fields(raw)
+	switch strings.ToLower(parts[0]) {
+	case "add":
+		if len(parts) < 4 {
+			t.sendText(ctx, b, chatID,
+				"Usage: <code>/bill add NAME AMOUNT DAY</code>\ne.g. <code>/bill add RENT 1850 3</code>")
+			return
+		}
+		name := strings.ToUpper(parts[1])
+		amt, err := parseDollarString(parts[2])
+		if err != nil || amt <= 0 {
+			t.sendText(ctx, b, chatID, "Couldn't parse that amount.")
+			return
+		}
+		day, err := strconv.Atoi(parts[3])
+		if err != nil || day < 1 || day > 31 {
+			t.sendText(ctx, b, chatID, "Day must be 1–31.")
+			return
+		}
+		billID, err := uuid.NewV7()
+		if err != nil {
+			t.sendText(ctx, b, chatID, errTryLater)
+			return
+		}
+		if err := t.store.InsertBill(ctx, sqlcgen.InsertBillParams{
+			ID: billID.String(), UserID: user.ID(),
+			Name: name, Amount: amt, DayOfMonth: int64(day),
+		}); err != nil {
+			slog.Error("failed to insert bill", "chatID", chatID, "err", err)
+			t.sendText(ctx, b, chatID, errTryLater)
+			return
+		}
+		t.sendText(ctx, b, chatID,
+			fmt.Sprintf("Added: <b>%s</b> %s on the %s of each month.", html.EscapeString(name), formatDollarsCents(amt), ordinal(day)))
+
+	case "remove", "rm", "delete":
+		if len(parts) < 2 {
+			t.sendText(ctx, b, chatID, "Usage: <code>/bill remove NAME</code>")
+			return
+		}
+		name := strings.ToUpper(parts[1])
+		res, err := t.store.DeactivateBillByName(ctx, sqlcgen.DeactivateBillByNameParams{
+			UserID: user.ID(), Name: name,
+		})
+		if err != nil {
+			slog.Error("failed to deactivate bill", "chatID", chatID, "err", err)
+			t.sendText(ctx, b, chatID, errTryLater)
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			t.sendText(ctx, b, chatID, fmt.Sprintf("No active bill named <b>%s</b> found.", html.EscapeString(name)))
+			return
+		}
+		t.sendText(ctx, b, chatID, fmt.Sprintf("Removed <b>%s</b> from recurring bills.", html.EscapeString(name)))
+
+	default:
+		t.sendText(ctx, b, chatID,
+			"Usage:\n"+
+				"  <code>/bill list</code> — show all bills\n"+
+				"  <code>/bill add NAME AMOUNT DAY</code> — add a bill\n"+
+				"  <code>/bill remove NAME</code> — remove a bill")
+	}
+}
+
+func (t *TelegramBot) handleIncome(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	raw := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/income"))
+
+	if raw == "" {
+		u, err := t.store.GetUserByID(ctx, user.ID())
+		if err != nil {
+			t.sendText(ctx, b, chatID, errTryLater)
+			return
+		}
+		if u.PayAmount != nil && u.PayDay != nil {
+			t.sendText(ctx, b, chatID,
+				fmt.Sprintf("Income: <b>%s</b> on the <b>%s</b> of each month.\nChange with <code>/income AMOUNT DAY</code> or disable with <code>/income off</code>.",
+					formatDollarsCents(*u.PayAmount), ordinal(int(*u.PayDay))))
+		} else {
+			t.sendText(ctx, b, chatID,
+				"No income configured. Set it with <code>/income AMOUNT DAY</code>\ne.g. <code>/income 2800 15</code>")
+		}
+		return
+	}
+
+	if strings.ToLower(raw) == "off" {
+		if err := t.store.ClearUserIncome(ctx, user.ID()); err != nil {
+			slog.Error("failed to clear income", "chatID", chatID, "err", err)
+			t.sendText(ctx, b, chatID, errTryLater)
+			return
+		}
+		t.sendText(ctx, b, chatID, "Income projection disabled.")
+		return
+	}
+
+	parts := strings.Fields(raw)
+	if len(parts) != 2 {
+		t.sendText(ctx, b, chatID, "Usage: <code>/income AMOUNT DAY</code> or <code>/income off</code>")
+		return
+	}
+	amt, err := parseDollarString(parts[0])
+	if err != nil || amt <= 0 {
+		t.sendText(ctx, b, chatID, "Couldn't parse that amount.")
+		return
+	}
+	day, err := strconv.Atoi(parts[1])
+	if err != nil || day < 1 || day > 31 {
+		t.sendText(ctx, b, chatID, "Day must be 1–31.")
+		return
+	}
+	if err := t.store.SetUserIncome(ctx, sqlcgen.SetUserIncomeParams{
+		PayAmount: &amt, PayDay: ptrInt64(int64(day)), ID: user.ID(),
+	}); err != nil {
+		slog.Error("failed to set income", "chatID", chatID, "err", err)
+		t.sendText(ctx, b, chatID, errTryLater)
+		return
+	}
+	t.sendText(ctx, b, chatID,
+		fmt.Sprintf("Income set: <b>%s</b> on the <b>%s</b> of each month.", formatDollarsCents(amt), ordinal(day)))
+}
+
+func (t *TelegramBot) handleRecurring(ctx context.Context, b *bot.Bot, update *models.Update) {
+	txID := strings.TrimPrefix(update.CallbackQuery.Data, "recur:")
+	user := domains.UserFromContext(ctx)
+	tx, err := t.store.GetTransaction(ctx, txID)
+	if err != nil {
+		t.answerCallback(ctx, b, update, "Transaction not found")
+		return
+	}
+	name := strings.ToUpper(tx.Name)
+	if tx.MerchantName != nil && *tx.MerchantName != "" {
+		name = strings.ToUpper(*tx.MerchantName)
+	}
+	// Truncate long merchant names for the bill label.
+	if len(name) > 12 {
+		name = name[:12]
+	}
+	// Derive day-of-month from the transaction's authorized or posted date.
+	dateStr := tx.Date
+	if tx.AuthorizedDate != nil {
+		dateStr = *tx.AuthorizedDate
+	}
+	parsed, err := time.Parse(time.DateOnly, dateStr)
+	if err != nil {
+		t.answerCallback(ctx, b, update, "Couldn't parse date")
+		return
+	}
+	day := parsed.Day()
+	billID, err := uuid.NewV7()
+	if err != nil {
+		t.answerCallback(ctx, b, update, "Internal error")
+		return
+	}
+	if err := t.store.InsertBill(ctx, sqlcgen.InsertBillParams{
+		ID: billID.String(), UserID: user.ID(),
+		Name: name, Amount: tx.Amount, DayOfMonth: int64(day),
+	}); err != nil {
+		slog.Error("failed to create bill from tx", "tx", txID, "err", err)
+		t.answerCallback(ctx, b, update, "Failed to create bill")
+		return
+	}
+	t.answerCallback(ctx, b, update,
+		fmt.Sprintf("Added %s %s on the %s", name, formatDollarsCents(tx.Amount), ordinal(day)))
+}
+
+func ordinal(n int) string {
+	switch {
+	case n%100 == 11 || n%100 == 12 || n%100 == 13:
+		return fmt.Sprintf("%dth", n)
+	case n%10 == 1:
+		return fmt.Sprintf("%dst", n)
+	case n%10 == 2:
+		return fmt.Sprintf("%dnd", n)
+	case n%10 == 3:
+		return fmt.Sprintf("%drd", n)
+	default:
+		return fmt.Sprintf("%dth", n)
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }
+
 func (t *TelegramBot) handleLink(ctx context.Context, b *bot.Bot, update *models.Update) {
 	slog.Info("got link request", "chatID", update.Message.Chat.ID)
 	user := domains.UserFromContext(ctx)
@@ -1376,6 +1599,9 @@ func transactionKeyboard(txID string, excluded bool) models.InlineKeyboardMarkup
 			{
 				{Text: "📊 Spread", CallbackData: "menu:amort:" + txID},
 				{Text: "🚫 Exclude", CallbackData: "exclude:" + txID},
+			},
+			{
+				{Text: "♻️ Recurring", CallbackData: "recur:" + txID},
 			},
 		},
 	}
