@@ -85,6 +85,8 @@ func (t *TelegramBot) handleAccounts(ctx context.Context, b *bot.Bot, update *mo
 			sb.WriteString("\n")
 		}
 	}
+	sb.WriteString("\nTo add or remove accounts, send <code>/update</code> followed by its number (e.g. <code>/update 1</code>).")
+	sb.WriteString("\nTo reconnect one, send <code>/relink</code> followed by its number (e.g. <code>/relink 1</code>).")
 	sb.WriteString("\nTo unlink one, send <code>/unlink</code> followed by its number (e.g. <code>/unlink 1</code>).")
 	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
@@ -94,6 +96,78 @@ func (t *TelegramBot) handleAccounts(ctx context.Context, b *bot.Bot, update *mo
 	if err != nil {
 		slog.Error("failed to send accounts list", "chatID", chatID, "err", err)
 	}
+}
+
+// handleRelink resolves /relink <n> to an item and sends a magic link that
+// opens Plaid Link in update mode, letting the user re-authenticate without
+// losing transaction history.
+func (t *TelegramBot) handleRelink(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	parts := strings.Fields(update.Message.Text)
+	if len(parts) != 2 {
+		t.sendText(ctx, b, chatID,
+			"To reconnect, send <code>/relink</code> followed by the account number from <code>/accounts</code> (e.g. <code>/relink 1</code>).")
+		return
+	}
+	items, err := t.store.ListItemsByUser(ctx, user.ID())
+	if err != nil {
+		slog.Error("failed to list items", "chatID", chatID, "err", err)
+		t.sendText(ctx, b, chatID, errTryLater)
+		return
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil || n < 1 || n > len(items) {
+		t.sendText(ctx, b, chatID,
+			"That doesn't match one of your account numbers — check <code>/accounts</code> and try again.")
+		return
+	}
+	item := items[n-1]
+	t.store.RelinkItems.Set(user.ID(), item.ItemID, t.cfg.TokenTTL)
+	institution := html.EscapeString(stringOr(item.InstitutionName, "Unknown institution"))
+	t.sendMagicLink(ctx, b, chatID, user, "/relink",
+		fmt.Sprintf("🔗 <b>Reconnect %s</b>\n\n"+
+			"Tap the link below to re-authenticate your account through Plaid. "+
+			"This link is <b>single-use</b> and expires in %s.\n\n"+
+			"Your existing transaction history will be preserved.",
+			institution, humanDuration(t.cfg.TokenTTL)),
+		"🔗 Reconnect")
+}
+
+// handleUpdate resolves /update <n> to an item and sends a magic link that
+// opens Plaid Link in update mode with account selection, letting the user
+// add or remove accounts.
+func (t *TelegramBot) handleUpdate(ctx context.Context, b *bot.Bot, update *models.Update) {
+	user := domains.UserFromContext(ctx)
+	chatID := update.Message.Chat.ID
+	parts := strings.Fields(update.Message.Text)
+	if len(parts) != 2 {
+		t.sendText(ctx, b, chatID,
+			"To update accounts, send <code>/update</code> followed by the account number from <code>/accounts</code> (e.g. <code>/update 1</code>).")
+		return
+	}
+	items, err := t.store.ListItemsByUser(ctx, user.ID())
+	if err != nil {
+		slog.Error("failed to list items", "chatID", chatID, "err", err)
+		t.sendText(ctx, b, chatID, errTryLater)
+		return
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil || n < 1 || n > len(items) {
+		t.sendText(ctx, b, chatID,
+			"That doesn't match one of your account numbers — check <code>/accounts</code> and try again.")
+		return
+	}
+	item := items[n-1]
+	t.store.UpdateItems.Set(user.ID(), item.ItemID, t.cfg.TokenTTL)
+	institution := html.EscapeString(stringOr(item.InstitutionName, "Unknown institution"))
+	t.sendMagicLink(ctx, b, chatID, user, "/update",
+		fmt.Sprintf("🔄 <b>Update Accounts for %s</b>\n\n"+
+			"Tap the link below to add or remove accounts (e.g. add savings). "+
+			"This link is <b>single-use</b> and expires in %s.\n\n"+
+			"Your existing transaction history will be preserved.",
+			institution, humanDuration(t.cfg.TokenTTL)),
+		"🔄 Update Accounts")
 }
 
 // handleUnlink resolves /unlink <n> to an item and asks for confirmation;

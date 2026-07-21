@@ -117,6 +117,7 @@ WHERE i.user_id = ?
   AND t.excluded = 0
   AND t.removed_at IS NULL
   AND t.amount > 0
+  AND t.category_primary != 'TRANSFER_IN'
   AND a.tracked = 1
 `
 

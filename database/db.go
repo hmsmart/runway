@@ -25,11 +25,13 @@ const SessionTTL = 24 * time.Hour
 
 type Store struct {
 	*sqlcgen.Queries
-	db         *sql.DB
-	TGTokens   *ttlcache.Cache[string, domains.User]
-	LinkTokens *ttlcache.Cache[string, domains.User]
-	TGPhotos   *ttlcache.Cache[string, domains.Photo]
-	Sessions   *ttlcache.Cache[string, domains.User]
+	db           *sql.DB
+	TGTokens     *ttlcache.Cache[string, domains.User]
+	LinkTokens   *ttlcache.Cache[string, domains.User]
+	RelinkItems  *ttlcache.Cache[string, string]
+	UpdateItems  *ttlcache.Cache[string, string]
+	TGPhotos     *ttlcache.Cache[string, domains.Photo]
+	Sessions     *ttlcache.Cache[string, domains.User]
 }
 
 func newDatabase(ctx context.Context, dbPath string) (*sql.DB,
@@ -69,19 +71,25 @@ func GetStore(ctx context.Context, dbPath string, tokenTTL time.Duration) (*Stor
 	}
 	TGTokens := ttlcache.New(ttlcache.WithTTL[string, domains.User](tokenTTL))
 	LinkTokens := ttlcache.New(ttlcache.WithTTL[string, domains.User](tokenTTL))
+	RelinkItems := ttlcache.New(ttlcache.WithTTL[string, string](tokenTTL))
+	UpdateItems := ttlcache.New(ttlcache.WithTTL[string, string](tokenTTL))
 	TGPhotos := ttlcache.New(ttlcache.WithTTL[string, domains.Photo](24 * time.Hour))
 	Sessions := ttlcache.New(ttlcache.WithTTL[string, domains.User](SessionTTL))
 	go TGTokens.Start()
 	go LinkTokens.Start()
+	go RelinkItems.Start()
+	go UpdateItems.Start()
 	go TGPhotos.Start()
 	go Sessions.Start()
 	return &Store{
-		Queries:    sqlcgen.New(db),
-		db:         db,
-		TGTokens:   TGTokens,
-		TGPhotos:   TGPhotos,
-		LinkTokens: LinkTokens,
-		Sessions:   Sessions,
+		Queries:     sqlcgen.New(db),
+		db:          db,
+		TGTokens:    TGTokens,
+		TGPhotos:    TGPhotos,
+		LinkTokens:  LinkTokens,
+		RelinkItems: RelinkItems,
+		UpdateItems: UpdateItems,
+		Sessions:    Sessions,
 	}, nil
 }
 

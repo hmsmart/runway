@@ -2,19 +2,19 @@ package charts
 
 import (
 	"fmt"
-	"math"
 	"strings"
 )
 
 // ADIState represents the combined attitude + course-deviation indicator.
 type ADIState struct {
-	Pitch      float64
-	BurnMTD    string
-	Ticks      []ADITick
-	HasBudget  bool
-	DevDays    float64
-	DevDollars float64
-	FuelWarn   bool
+	Pitch        float64
+	BurnMTD      string
+	Ticks        []ADITick
+	HasBudget    bool
+	DevDays      float64
+	DevDollars   float64
+	DeltaPerDay  float64 // ema14 - target (per-day dollar deviation)
+	FuelWarn     bool
 }
 
 type ADITick struct {
@@ -30,12 +30,12 @@ func (t ADITick) Fill() string {
 	return "rgba(255,170,160,0.85)"
 }
 
-func ComputeADI(targetDaily, ema14, ema28, burnMTD float64, hasBudget bool, devDays, devDollars, fuelDays float64, daysLeft int) ADIState {
+func ComputeADI(targetDaily, ema14, ema28, burnMTD, budgetDaily float64, hasBudget bool, devDays, devDollars, fuelDays float64, daysLeft int) ADIState {
 	if targetDaily <= 0 {
 		targetDaily = 1
 	}
-	ratio := (targetDaily - ema14) / targetDaily
-	pitch := clamp(ratio*55, -45, 45)
+	ratio := (ema14 - targetDaily) / targetDaily
+	pitch := clamp(-ratio/0.25*20, -45, 45)
 
 	fuelWarn := false
 	if fuelDays > 0 && daysLeft > 0 && fuelDays < float64(daysLeft) {
@@ -46,13 +46,14 @@ func ComputeADI(targetDaily, ema14, ema28, burnMTD float64, hasBudget bool, devD
 	}
 
 	return ADIState{
-		Pitch:      pitch,
-		BurnMTD:    formatUSD(burnMTD),
-		Ticks:      buildTicks(targetDaily, ema14, ema28),
-		HasBudget:  hasBudget,
-		DevDays:    devDays,
-		DevDollars: devDollars,
-		FuelWarn:   fuelWarn,
+		Pitch:       pitch,
+		BurnMTD:     formatUSD(burnMTD),
+		Ticks:       buildTicks(),
+		HasBudget:   hasBudget,
+		DevDays:     devDays,
+		DevDollars:  devDollars,
+		DeltaPerDay: ema14 - budgetDaily,
+		FuelWarn:    fuelWarn,
 	}
 }
 
@@ -127,6 +128,7 @@ func ADI(state ADIState) string {
 		fmt.Fprintf(&b, `<polygon points="%s,%s %s,%s %s,%s %s,%s" fill="%s"/>`,
 			f(100+locDX-4), f(locY), f(100+locDX), f(locY-5), f(100+locDX+4), f(locY), f(100+locDX), f(locY+5),
 			locColor)
+
 	} else {
 		fmt.Fprintf(&b, `<rect x="80" y="%s" width="40" height="18" rx="3" fill="%s"/>`, f(locY-9), gaugeRed)
 		fmt.Fprintf(&b, `<text x="100" y="%s" text-anchor="middle" font-size="10" font-weight="700" fill="#fff" letter-spacing="0.14em">NAV</text>`, f(locY+4))
@@ -138,25 +140,43 @@ func ADI(state ADIState) string {
 		b.WriteString(`<text x="155" y="22" text-anchor="middle" font-family="'B612 Mono',monospace" font-size="8" font-weight="700" fill="var(--lamp-warn-edge,#d99114)" letter-spacing="0.1em">FUEL</text>`)
 	}
 
-	// Fixed aircraft reticle — V-shape chevron with flat wing tips.
-	b.WriteString(`<polyline points="30,100 55,100 100,118" fill="none" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`)
-	b.WriteString(`<polyline points="170,100 145,100 100,118" fill="none" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`)
-	b.WriteString(`<circle cx="100" cy="106" r="4" fill="#ff8c00"/>`)
+	// Fixed aircraft reticle — flat wings with center dot.
+	b.WriteString(`<line x1="30" y1="100" x2="80" y2="100" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round"/>`)
+	b.WriteString(`<line x1="120" y1="100" x2="170" y2="100" stroke="#ff8c00" stroke-width="3.5" stroke-linecap="round"/>`)
+	b.WriteString(`<circle cx="100" cy="100" r="4" fill="#ff8c00"/>`)
 
-	// Readout boxes — bottom center, side by side.
+	// Readout boxes — three columns across the bottom.
 	burnFill := "#00ff88"
 	if state.Pitch < 0 {
 		burnFill = "#ff5c5c"
 	}
-	b.WriteString(`<rect x="10" y="168" width="84" height="20" rx="3" class="adi-readout"/>`)
-	b.WriteString(`<text x="52" y="176" text-anchor="middle" class="adi-readout-label" style="fill:rgba(255,255,255,0.5)">BURN MTD</text>`)
-	fmt.Fprintf(&b, `<text x="52" y="186" text-anchor="middle" class="adi-readout-val" style="fill:%s">%s</text>`, burnFill, esc(state.BurnMTD))
+	// BURN MTD (left)
+	b.WriteString(`<rect x="10" y="168" width="56" height="20" rx="3" class="adi-readout"/>`)
+	b.WriteString(`<text x="38" y="176" text-anchor="middle" class="adi-readout-label" style="fill:rgba(255,255,255,0.5)">BURN MTD</text>`)
+	fmt.Fprintf(&b, `<text x="38" y="186" text-anchor="middle" class="adi-readout-val" style="fill:%s">%s</text>`, burnFill, esc(state.BurnMTD))
 
 	if state.HasBudget {
+		// $ DEV (center) — per-day dollar deviation from budget
+		deltaAbs := state.DeltaPerDay
+		deltaSign := "+"
+		deltaColor := "#4ade80"
+		if deltaAbs >= 0 {
+			deltaColor = cdiDiamondColor(state.DevDays)
+		} else {
+			deltaSign = "-"
+			deltaAbs = -deltaAbs
+		}
+		deltaStr := fmt.Sprintf("%s$%.0f", deltaSign, deltaAbs)
+		b.WriteString(`<rect x="70" y="168" width="56" height="20" rx="3" class="adi-readout"/>`)
+		b.WriteString(`<text x="98" y="176" text-anchor="middle" class="adi-readout-label" style="fill:rgba(255,255,255,0.5)">$ DEV</text>`)
+		fmt.Fprintf(&b, `<text x="98" y="186" text-anchor="middle" class="adi-readout-val" style="fill:%s">%s</text>`,
+			deltaColor, esc(deltaStr))
+
+		// EOM DEV (right) — end-of-month deviation in budget-days
 		devFill := cdiDiamondColor(state.DevDays)
-		b.WriteString(`<rect x="106" y="168" width="84" height="20" rx="3" class="adi-readout"/>`)
-		b.WriteString(`<text x="148" y="176" text-anchor="middle" class="adi-readout-label" style="fill:rgba(255,255,255,0.5)">CDI DEV</text>`)
-		fmt.Fprintf(&b, `<text x="148" y="186" text-anchor="middle" class="adi-readout-val" style="fill:%s">%s</text>`,
+		b.WriteString(`<rect x="130" y="168" width="60" height="20" rx="3" class="adi-readout"/>`)
+		b.WriteString(`<text x="160" y="176" text-anchor="middle" class="adi-readout-label" style="fill:rgba(255,255,255,0.5)">EOM DEV</text>`)
+		fmt.Fprintf(&b, `<text x="160" y="186" text-anchor="middle" class="adi-readout-val" style="fill:%s">%s</text>`,
 			devFill, esc(cdiReadout(state)))
 	}
 
@@ -199,33 +219,16 @@ func formatUSD(v float64) string {
 	return fmt.Sprintf("$%.2f", v)
 }
 
-func buildTicks(target, ema14, ema28 float64) []ADITick {
-	var ticks []ADITick
-	type emaEntry struct {
-		label string
-		delta float64
-	}
-	entries := []emaEntry{{"14d", ema14 - target}, {"28d", ema28 - target}}
+func buildTicks() []ADITick {
 	spacing := 20.0
-	skyIdx := 1
-	gndIdx := 1
-	for _, e := range entries {
-		if e.delta > 0 {
-			ticks = append(ticks, ADITick{DY: spacing * float64(gndIdx), Label: "+" + formatUSD(e.delta), Sky: false})
-			gndIdx++
-		} else if e.delta < 0 {
-			ticks = append(ticks, ADITick{DY: -spacing * float64(skyIdx), Label: "-" + formatUSD(math.Abs(e.delta)), Sky: true})
-			skyIdx++
-		}
-	}
-	for _, e := range entries {
-		if e.delta > 0 {
-			ticks = append(ticks, ADITick{DY: spacing * float64(gndIdx), Label: "+" + formatUSD(e.delta*2), Sky: false})
-			gndIdx++
-		} else if e.delta < 0 {
-			ticks = append(ticks, ADITick{DY: -spacing * float64(skyIdx), Label: "-" + formatUSD(math.Abs(e.delta*2)), Sky: true})
-			skyIdx++
-		}
+	steps := []string{".25x", ".5x", ".75x"}
+	var ticks []ADITick
+	for i, label := range steps {
+		dy := spacing * float64(i+1)
+		ticks = append(ticks,
+			ADITick{DY: dy, Label: "+" + label, Sky: false},
+			ADITick{DY: -dy, Label: "-" + label, Sky: true},
+		)
 	}
 	return ticks
 }

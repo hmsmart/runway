@@ -26,6 +26,17 @@ func (l LampState) String() string {
 	}
 }
 
+func (l LampState) readoutColor() string {
+	switch l {
+	case LampOver:
+		return "#e24b4a"
+	case LampWarn:
+		return "#d99114"
+	default:
+		return "#00ff88"
+	}
+}
+
 // CSS returns the modifier class for the lamp, tying it to the --lamp-*
 // theme variables.
 func (l LampState) CSS() string {

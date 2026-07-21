@@ -1,0 +1,59 @@
+package templates
+
+script initPlaidUpdate(token string, itemID string) {
+    const btn = document.getElementById('update-button');
+    const status = document.getElementById('status');
+    const openLink = () => handler.open();
+    const handler = Plaid.create({
+        token: token,
+        onSuccess: async () => {
+            btn.removeEventListener('click', openLink);
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+            btn.textContent = 'updating...';
+            let ok = false;
+            try {
+                const res = await fetch('/update-complete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({link_token: token, item_id: itemID})
+                });
+                ok = res.ok;
+            } catch (_) {}
+            btn.removeAttribute('aria-busy');
+            if (ok) {
+                btn.disabled = false;
+                btn.textContent = 'go to your dashboard';
+                btn.addEventListener('click', () => window.location.href = '/dashboard');
+                status.textContent = 'accounts updated — your transactions will sync shortly';
+            } else {
+                btn.textContent = 'update failed';
+                status.textContent = 'something went wrong — ask the bot for a fresh link';
+            }
+        },
+        onExit: (err) => {
+            if (err) status.textContent = err.display_message || 'link exited with an error';
+        }
+    });
+    btn.addEventListener('click', openLink);
+}
+
+templ UpdatePage(linkToken string, itemID string, institution string) {
+    @Layout("Update Accounts") {
+        <article>
+        <h1>update accounts for { institution }</h1>
+        <h3 class="pico-color-amber-200">add or remove accounts</h3>
+        <p>
+            tap the button below to choose which accounts runway tracks at this institution.
+            you can add new accounts (like savings) or remove ones you no longer want tracked.
+        </p>
+        <p>
+            your existing transaction history will be preserved for any accounts that stay connected.
+        </p>
+        <button id="update-button">choose accounts</button>
+            <p id="status"></p>
+            <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+            @initPlaidUpdate(linkToken, itemID)
+        </article>
+    }
+}

@@ -278,56 +278,33 @@ func handleGaugeVSI(store *database.Store) http.HandlerFunc {
 		if err != nil {
 			return "", err
 		}
-		accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
-		if err != nil {
-			return "", err
-		}
-		if !hasDepository(accounts) {
-			return charts.VSI(nil, 0), nil
-		}
-
-		// VSI uses available depository cash only (not net of credit owed),
-		// so it reflects direct runway-day sensitivity to burn-rate changes.
-		cash, _ := cashOnHand(accounts)
-		if cash <= 0 {
+		db := computeDailyBudget(r.Context(), store, userID)
+		if !db.HasBudget || db.Allowance <= 0 {
 			return charts.VSI(nil, 0), nil
 		}
 
 		today := time.Now().Format(time.DateOnly)
-		runwayDays := make([]float64, 0, len(dailies))
+		// Collect EMA14 values for complete days only.
+		var emas []float64
 		for _, v := range dailies {
-			// Use only complete days; today's partial spend can swing EMA and
-			// produce an exaggerated intraday runway delta.
-			if v.Date < today && v.Ema14 != nil {
-				// Very small EMA14 values explode runway-days math and can
-				// dominate the gauge scale with unrealistic historical spikes.
-				if *v.Ema14 < 1 {
-					continue
-				}
-				days := runwayFuelDays(cash, *v.Ema14)
-				if !math.IsInf(days, 0) && !math.IsNaN(days) {
-					runwayDays = append(runwayDays, days)
-				}
+			if v.Date < today && v.Ema14 != nil && *v.Ema14 >= 1 {
+				emas = append(emas, *v.Ema14)
 			}
 		}
 
-		// Keep the gauge adaptive to current behavior by using a recent window
-		// for scale fitting rather than the full historical tail.
-		const maxRunwaySamples = 45
-		if len(runwayDays) > maxRunwaySamples {
-			runwayDays = runwayDays[len(runwayDays)-maxRunwaySamples:]
+		const maxSamples = 45
+		if len(emas) > maxSamples {
+			emas = emas[len(emas)-maxSamples:]
 		}
-		if len(runwayDays) < 2 {
-			return "", fmt.Errorf("insufficient runway-day history")
+		if len(emas) < 2 {
+			return "", fmt.Errorf("insufficient EMA history")
 		}
 
-		deltas := make([]float64, 0, len(runwayDays)-1)
-		for i := 1; i < len(runwayDays); i++ {
-			// Positive means runway days are increasing (improving).
-			deltas = append(deltas, runwayDays[i]-runwayDays[i-1])
-		}
-		if len(deltas) == 0 {
-			return "", fmt.Errorf("insufficient delta history")
+		// Budget-days gained per day: a dropping EMA means you're gaining
+		// budget-days, so the sign is flipped (positive = improving = climbing).
+		deltas := make([]float64, 0, len(emas)-1)
+		for i := 1; i < len(emas); i++ {
+			deltas = append(deltas, (emas[i-1]-emas[i])/db.Allowance)
 		}
 		current := deltas[len(deltas)-1]
 		return charts.VSI(deltas, current), nil
@@ -351,20 +328,22 @@ func handleGaugeADI(store *database.Store) http.HandlerFunc {
 		now := time.Now()
 		burnMTD := monthToDateSpend(dailies, now)
 
-		targetDaily := s.Target
 		hasBudget := userRow.DiscretionaryMonthly != nil && *userRow.DiscretionaryMonthly > 0
 		daysLeft := max(daysInMonth(now)-now.Day()+1, 1)
-		var devDays, devDollars float64
+		var targetDaily, budgetDaily, devDays, devDollars float64
 		if hasBudget {
 			dailyAllowance := *userRow.DiscretionaryMonthly / float64(daysInMonth(now))
+			targetDaily = dailyAllowance
+			budgetDaily = dailyAllowance
 			plannedCumulative := dailyAllowance * float64(now.Day())
 			devDollars = burnMTD - plannedCumulative
 			if dailyAllowance > 0 {
 				devDays = devDollars / dailyAllowance
 			}
-			if targetDaily <= 0 {
-				targetDaily = dailyAllowance
-			}
+		} else if s.Target > 0 {
+			targetDaily = s.Target
+		} else {
+			targetDaily = 1
 		}
 
 		accounts, err := store.ListTrackedAccountsByUser(r.Context(), userID)
@@ -378,7 +357,7 @@ func handleGaugeADI(store *database.Store) http.HandlerFunc {
 			fuelDays = runwayFuelDays(net, s.E14)
 		}
 
-		state := charts.ComputeADI(targetDaily, s.E14, s.E28, burnMTD, hasBudget, devDays, devDollars, fuelDays, daysLeft)
+		state := charts.ComputeADI(targetDaily, s.E14, s.E28, burnMTD, budgetDaily, hasBudget, devDays, devDollars, fuelDays, daysLeft)
 		return charts.ADI(state), nil
 	})
 }
@@ -451,6 +430,8 @@ func handleGaugeCAS(store *database.Store) http.HandlerFunc {
 
 		state := charts.CASPanelState{
 			Annunciator: annState,
+			EMA14:       formatDollarsCents(s.E14),
+			EMA28:       formatDollarsCents(s.E28),
 			Target:      formatDollars(math.Round(db.Allowance)),
 			Commit:      formatDollarsCents(db.Committed),
 			SpentToday:  formatDollarsCents(db.Spent),

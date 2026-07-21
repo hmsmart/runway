@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/domains"
+	"github.com/hmsmart/runway/templates"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -130,6 +131,12 @@ func run(ctx context.Context) error {
 	mux.Handle("GET /gauge/fuel", requireSession(handleGaugeFuel(store)))
 	mux.Handle("GET /gauge/egt", requireSession(handleGaugeEGT(store)))
 	mux.Handle("GET /gauge/fms-bills", requireSession(handleGaugeFMSBills(store)))
+	mux.Handle("GET /relink", handleItemUpdate(plaidClient, cfg, store, store.RelinkItems, false, "/relink", templates.RelinkPage))
+	mux.Handle("POST /relink", handleMagicConfirm(store, "/relink"))
+	mux.Handle("POST /relink-complete", handleItemUpdateComplete(plaidClient, store, cfg, tg, "relink"))
+	mux.Handle("GET /update", handleItemUpdate(plaidClient, cfg, store, store.UpdateItems, true, "/update", templates.UpdatePage))
+	mux.Handle("POST /update", handleMagicConfirm(store, "/update"))
+	mux.Handle("POST /update-complete", handleItemUpdateComplete(plaidClient, store, cfg, tg, "update"))
 	mux.Handle("POST /exchange-token", handleTokenExchange(plaidClient, store, cfg, tg))
 	mux.Handle("POST "+webhookPath(cfg.PlaidWebhookURL), handlePlaidWebhook(plaidClient, store, cfg, tg))
 	mux.Handle("POST /hook/hold", handleHoldWebhook(store, cfg, tg))

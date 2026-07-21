@@ -1,0 +1,61 @@
+package templates
+
+script initPlaidRelink(token string, itemID string) {
+    const btn = document.getElementById('relink-button');
+    const status = document.getElementById('status');
+    const openLink = () => handler.open();
+    const handler = Plaid.create({
+        token: token,
+        onSuccess: async () => {
+            btn.removeEventListener('click', openLink);
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+            btn.textContent = 'reconnecting...';
+            let ok = false;
+            try {
+                const res = await fetch('/relink-complete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({link_token: token, item_id: itemID})
+                });
+                ok = res.ok;
+            } catch (_) {}
+            btn.removeAttribute('aria-busy');
+            if (ok) {
+                btn.disabled = false;
+                btn.textContent = 'go to your dashboard';
+                btn.addEventListener('click', () => window.location.href = '/dashboard');
+                status.textContent = 'reconnected — your transactions will sync shortly';
+            } else {
+                btn.textContent = 'reconnect failed';
+                status.textContent = 'something went wrong — ask the bot for a fresh link';
+            }
+        },
+        onExit: (err) => {
+            if (err) status.textContent = err.display_message || 'link exited with an error';
+        }
+    });
+    btn.addEventListener('click', openLink);
+}
+
+templ RelinkPage(linkToken string, itemID string, institution string) {
+    @Layout("Reconnect Account") {
+        <article>
+        <h1>reconnect { institution }</h1>
+        <h3 class="pico-color-amber-200">re-authenticate your account</h3>
+        <p>
+            your bank connection needs to be refreshed. this usually happens when your bank
+            credentials change (new password, security update, etc.).
+        </p>
+        <p>
+            tap the button below to securely re-authenticate through
+            <a href="https://plaid.com" target="_blank"><span class="sc">plaid</span></a>.
+            your existing transaction history will be preserved.
+        </p>
+        <button id="relink-button">reconnect your bank</button>
+            <p id="status"></p>
+            <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+            @initPlaidRelink(linkToken, itemID)
+        </article>
+    }
+}

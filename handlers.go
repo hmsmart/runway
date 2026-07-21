@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/a-h/templ"
 	"github.com/hmsmart/runway/database"
 	"github.com/hmsmart/runway/database/sqlcgen"
 	"github.com/hmsmart/runway/domains"
 	"github.com/hmsmart/runway/templates"
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/plaid/plaid-go/v43/plaid"
 )
 
@@ -192,6 +194,7 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 		depository := plaid.DepositoryFilter{
 			AccountSubtypes: []plaid.DepositoryAccountSubtype{
 				plaid.DEPOSITORYACCOUNTSUBTYPE_CHECKING,
+				plaid.DEPOSITORYACCOUNTSUBTYPE_SAVINGS,
 			},
 		}
 		credit := plaid.CreditFilter{
@@ -232,6 +235,152 @@ func handleLink(plaidClient *plaid.APIClient, cfg *Config, store *database.Store
 		if err := templates.LinkPage(plaidLinkToken, tgUser.FirstName()).Render(r.Context(), w); err != nil {
 			slog.Error("failed to render link page", "for", ip, "err", err)
 		}
+	}
+}
+
+// handleItemUpdate is the shared web handler for both /relink (re-auth) and
+// /update (account selection). The caller passes the item cache to read from,
+// whether account selection is enabled, the page path (for the confirm step),
+// and the template renderer.
+func handleItemUpdate(
+	plaidClient *plaid.APIClient, cfg *Config, store *database.Store,
+	itemCache *ttlcache.Cache[string, string],
+	accountSelection bool,
+	path string,
+	render func(linkToken, itemID, institution string) templ.Component,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		slog.Info("begin "+path+" request", "for", ip)
+		if token := r.URL.Query().Get("token"); store.TGTokens.Has(token) {
+			if err := templates.ConfirmPage(path, token).Render(r.Context(), w); err != nil {
+				slog.Error("failed to render confirm page", "for", ip, "err", err)
+			}
+			return
+		}
+		sessionUser := domains.UserFromContext(r.Context())
+		if sessionUser == nil {
+			httpError(r.Context(), w, ip, http.StatusUnauthorized, "not authorized — ask the bot for a fresh link")
+			return
+		}
+		tgUser := *sessionUser
+		cached := itemCache.Get(tgUser.ID())
+		if cached == nil {
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "no pending action — use the bot command first")
+			return
+		}
+		itemID := cached.Value()
+		itemCache.Delete(tgUser.ID())
+		item, err := store.GetItemByID(r.Context(), itemID)
+		if err != nil {
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "account not found")
+			return
+		}
+		if item.UserID != tgUser.ID() {
+			httpError(r.Context(), w, ip, http.StatusForbidden, "not your account")
+			return
+		}
+		accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
+		if err != nil {
+			httpError(r.Context(), w, ip, http.StatusInternalServerError, "internal error", "err", err)
+			return
+		}
+		user := plaid.LinkTokenCreateRequestUser{
+			ClientUserId: tgUser.ID(),
+		}
+		plaidRequest := plaid.NewLinkTokenCreateRequest(
+			"Runway",
+			"en",
+			cfg.PlaidCountryCodeList,
+		)
+		plaidRequest.SetAccessToken(accessToken)
+		plaidRequest.SetWebhook(cfg.PlaidWebhookURL)
+		plaidRequest.SetUser(user)
+		if accountSelection {
+			upd := plaid.NewLinkTokenCreateRequestUpdate()
+			upd.SetAccountSelectionEnabled(true)
+			plaidRequest.SetUpdate(*upd)
+		}
+		callCtx, cancel := context.WithTimeout(r.Context(), cfg.PlaidTimeout)
+		defer cancel()
+		linkTokenCreateResp, httpResp, err := plaidClient.PlaidApi.LinkTokenCreate(callCtx).LinkTokenCreateRequest(*plaidRequest).Execute()
+		if err != nil {
+			var respBody string
+			if httpResp != nil {
+				b, _ := io.ReadAll(httpResp.Body)
+				respBody = string(b)
+			}
+			httpError(r.Context(), w, ip, http.StatusBadGateway, "bad gateway", "err", err, "resp", respBody)
+			return
+		}
+		plaidLinkToken := linkTokenCreateResp.GetLinkToken()
+		store.LinkTokens.Set(plaidLinkToken, tgUser, cfg.TokenTTL)
+		institution := stringOr(item.InstitutionName, "your bank")
+		if err := render(plaidLinkToken, item.ItemID, institution).Render(r.Context(), w); err != nil {
+			slog.Error("failed to render page", "for", ip, "path", path, "err", err)
+		}
+	}
+}
+
+// handleItemUpdateComplete is the shared POST handler for both /relink-complete
+// and /update-complete. It syncs the item, recomputes spend, and notifies via
+// Telegram.
+func handleItemUpdateComplete(plaidClient *plaid.APIClient, store *database.Store, cfg *Config, tg *TelegramBot, action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		var body struct {
+			LinkToken string `json:"link_token"`
+			ItemID    string `json:"item_id"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad request", "err", err)
+			return
+		}
+		cached := store.LinkTokens.Get(body.LinkToken)
+		if cached == nil {
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "bad token")
+			return
+		}
+		tgUser := cached.Value()
+		store.LinkTokens.Delete(body.LinkToken)
+		item, err := store.GetItemByID(r.Context(), body.ItemID)
+		if err != nil {
+			httpError(r.Context(), w, ip, http.StatusBadRequest, "item not found")
+			return
+		}
+		if item.UserID != tgUser.ID() {
+			httpError(r.Context(), w, ip, http.StatusForbidden, "not authorized")
+			return
+		}
+		slog.Info(action+" completed", "for", ip, "item", item.ItemID)
+		chatID := tgUser.TelegramID()
+		institution := stringOr(item.InstitutionName, "your bank")
+		var msg string
+		if action == "relink" {
+			msg = "🔗 Reconnected <b>" + institution + "</b> — your transactions will sync shortly."
+		} else {
+			msg = "🔄 Updated accounts for <b>" + institution + "</b> — syncing now."
+		}
+		persistCtx := context.WithoutCancel(r.Context())
+		tg.sendText(persistCtx, tg.bot, chatID, msg)
+		accessToken, err := DecryptColumnSecret(item.AccessToken, item.ItemID, cfg.DBCryptKey)
+		if err != nil {
+			slog.Error(action+" sync decrypt failed", "item", item.ItemID, "err", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		go func() {
+			if err := syncItem(persistCtx, item.ItemID, accessToken, item.Cursor, plaidClient, store, cfg); err != nil {
+				slog.Error("post-"+action+" sync failed", "item", item.ItemID, "err", err)
+			}
+			if err := recomputeDailySpend(persistCtx, store, tgUser.ID()); err != nil {
+				slog.Error("post-"+action+" recompute failed", "user", tgUser.ID(), "err", err)
+			}
+			tg.startDrain(chatID)
+		}()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(action + " complete"))
 	}
 }
 

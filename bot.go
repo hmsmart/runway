@@ -250,6 +250,14 @@ func (t *TelegramBot) RegisterHandlers() {
 		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unlink", bot.MatchTypePrefix,
 		chain(t.handleUnlink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/relink", bot.MatchTypeExact,
+		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/relink", bot.MatchTypePrefix,
+		chain(t.handleRelink, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/update", bot.MatchTypeExact,
+		chain(t.handleAccounts, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
+	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/update", bot.MatchTypePrefix,
+		chain(t.handleUpdate, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/unregister", bot.MatchTypeExact,
 		chain(t.handleUnregister, t.fetchUser, t.syncCommands, t.requirePermission(domains.PermissionActive)))
 	t.bot.RegisterHandler(bot.HandlerTypeMessageText, "/invite", bot.MatchTypeExact,
@@ -341,6 +349,8 @@ func (t *TelegramBot) handleHelp(ctx context.Context, b *bot.Bot, update *models
 			"<code>/dash</code> — sign in to your web dashboard\n" +
 			"<code>/link</code> — connect a bank account\n" +
 			"<code>/accounts</code> — list your linked accounts and balances\n" +
+			"<code>/update [N]</code> — add or remove accounts at a linked institution\n" +
+			"<code>/relink [N]</code> — reconnect a bank account (e.g. after a password change)\n" +
 			"<code>/unlink [N]</code> — list your accounts, or unlink one by number\n"
 		text += "<code>/apikey</code> — generate an API key for iOS Shortcuts\n"
 		if user.Has(domains.PermissionInvite) {
@@ -1211,6 +1221,8 @@ func (t *TelegramBot) setCommandMenu(ctx context.Context, chatID int64, user *do
 				models.BotCommand{Command: "dash", Description: "Sign in to your web dashboard"},
 				models.BotCommand{Command: "link", Description: "Link a bank account"},
 				models.BotCommand{Command: "accounts", Description: "List your linked accounts and balances"},
+				models.BotCommand{Command: "update", Description: "Add or remove accounts at an institution"},
+				models.BotCommand{Command: "relink", Description: "Reconnect a bank account by number"},
 				models.BotCommand{Command: "unlink", Description: "List accounts, or unlink one by number"},
 			)
 			cmds = append(cmds, models.BotCommand{Command: "apikey", Description: "Generate an API key for iOS Shortcuts"})

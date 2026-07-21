@@ -10,6 +10,10 @@ import (
 type CASPanelState struct {
 	Annunciator Annunciator
 
+	// EMA readouts.
+	EMA14 string // formatted 14-day EMA, e.g. "$42"
+	EMA28 string // formatted 28-day EMA, e.g. "$38"
+
 	// Flight data.
 	Target      string  // daily budget allowance, e.g. "$46"
 	Commit      string  // committed daily burn from spreads, e.g. "$18"
@@ -32,7 +36,7 @@ type CASPanelState struct {
 // CASPanelSVG renders the full CAS panel: 4 lamps, TARGET/COMMIT/AVAIL/G·S
 // flight data, O/M/I markers, and a fuel strip. All in one 200×400 panel.
 func CASPanelSVG(s CASPanelState) string {
-	const w, h = 200, 400
+	const w, h = 200, 450
 	a := s.Annunciator
 
 	var b strings.Builder
@@ -51,7 +55,7 @@ func CASPanelSVG(s CASPanelState) string {
 `)
 
 	b.WriteString(`<g>`)
-	b.WriteString(`<rect x="8" y="8" width="184" height="384" class="cas-panel"/>`)
+	b.WriteString(`<rect x="8" y="8" width="184" height="434" class="cas-panel"/>`)
 	b.WriteString(`<text x="100" y="26" text-anchor="middle" class="cas-title" style="fill:#5a6270">CAS · STATUS</text>`)
 
 	// ── Annunciator lamps ──────────────────────────────────────────
@@ -62,33 +66,43 @@ func CASPanelSVG(s CASPanelState) string {
 		casLamp(&b, x, y, lamp)
 	}
 
-	// ── Flight data: TARGET / G·S / COMMIT / SPENT / AVAIL ─────────
+	// ── EMA readouts ─────────────────────────────────────────────────
 	b.WriteString(`<line x1="24" y1="158" x2="176" y2="158" class="cas-divider"/>`)
 
+	ema14Color := a.Lamp14.State.readoutColor()
+	ema28Color := a.Lamp28.State.readoutColor()
+	b.WriteString(`<text x="24" y="176" class="cas-dme-lbl">EMA-14</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="177" text-anchor="end" class="cas-dme-val" style="fill:%s">%s</text>`, ema14Color, esc(s.EMA14))
+	b.WriteString(`<text x="24" y="196" class="cas-dme-lbl">EMA-28</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="197" text-anchor="end" class="cas-dme-val" style="fill:%s">%s</text>`, ema28Color, esc(s.EMA28))
+
+	// ── Flight data: TARGET / G·S / COMMIT / SPENT / AVAIL ─────────
+	b.WriteString(`<line x1="24" y1="208" x2="176" y2="208" class="cas-divider"/>`)
+
 	// TARGET
-	b.WriteString(`<text x="24" y="176" class="cas-dme-lbl">TARGET</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="177" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Target))
+	b.WriteString(`<text x="24" y="226" class="cas-dme-lbl">TARGET</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="227" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Target))
 
 	// G/S — glideslope adjustment (sits right under TARGET as a modifier)
-	b.WriteString(`<text x="24" y="196" class="cas-dme-lbl">G/S</text>`)
+	b.WriteString(`<text x="24" y="246" class="cas-dme-lbl">G/S</text>`)
 	if s.Reduction <= 0 {
-		b.WriteString(`<text x="176" y="197" text-anchor="end" class="cas-dme-val">OK</text>`)
+		b.WriteString(`<text x="176" y="247" text-anchor="end" class="cas-dme-val">OK</text>`)
 	} else {
 		gsColor := gaugeAmber
 		if s.Reduction > 10 {
 			gsColor = gaugeRed
 		}
-		fmt.Fprintf(&b, `<text x="176" y="197" text-anchor="end" class="cas-dme-val" style="fill:%s">−%s</text>`,
+		fmt.Fprintf(&b, `<text x="176" y="247" text-anchor="end" class="cas-dme-val" style="fill:%s">−%s</text>`,
 			gsColor, esc(fmtCents(s.Reduction)))
 	}
 
 	// COMMIT
-	b.WriteString(`<text x="24" y="216" class="cas-dme-lbl">COMMIT</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="217" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Commit))
+	b.WriteString(`<text x="24" y="266" class="cas-dme-lbl">COMMIT</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="267" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.Commit))
 
 	// SPENT
-	b.WriteString(`<text x="24" y="236" class="cas-dme-lbl">SPENT</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="237" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.SpentToday))
+	b.WriteString(`<text x="24" y="286" class="cas-dme-lbl">SPENT</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="287" text-anchor="end" class="cas-dme-val">%s</text>`, esc(s.SpentToday))
 
 	// AVAIL = TARGET - G/S - COMMIT - SPENT
 	avail := s.TargetVal - s.Reduction - s.CommitVal - s.SpentTodVal
@@ -98,16 +112,16 @@ func CASPanelSVG(s CASPanelState) string {
 		availColor = gaugeRed
 		availStr = "$0"
 	}
-	b.WriteString(`<text x="24" y="256" class="cas-dme-lbl">AVAIL</text>`)
-	fmt.Fprintf(&b, `<text x="176" y="257" text-anchor="end" class="cas-dme-val" style="fill:%s">%s</text>`, availColor, esc(availStr))
+	b.WriteString(`<text x="24" y="306" class="cas-dme-lbl">AVAIL</text>`)
+	fmt.Fprintf(&b, `<text x="176" y="307" text-anchor="end" class="cas-dme-val" style="fill:%s">%s</text>`, availColor, esc(availStr))
 
 	// ── Markers (O/M/I) with progress bar ──────────────────────────
-	b.WriteString(`<line x1="24" y1="270" x2="176" y2="270" class="cas-divider"/>`)
+	b.WriteString(`<line x1="24" y1="320" x2="176" y2="320" class="cas-divider"/>`)
 
 	const (
 		barL = 24.0
 		barR = 176.0
-		barY = 284.0
+		barY = 334.0
 		barH = 8.0
 	)
 	barW := barR - barL
@@ -175,16 +189,16 @@ func CASPanelSVG(s CASPanelState) string {
 	)
 	stripW := stripR - stripL
 
-	b.WriteString(`<line x1="24" y1="330" x2="176" y2="330" class="cas-divider"/>`)
+	b.WriteString(`<line x1="24" y1="368" x2="176" y2="368" class="cas-divider"/>`)
 
 	if s.HasFuel {
 		daysLabel := fuelReadout(s.Days14)
 		fuelColor := casFuelColor(s.Days14)
-		fmt.Fprintf(&b, `<text x="%s" y="342" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
-		fmt.Fprintf(&b, `<text x="%s" y="342" text-anchor="end" class="cas-fuel-val" style="fill:%s">%s<tspan font-size="8" font-weight="600"> DAYS</tspan></text>`,
+		fmt.Fprintf(&b, `<text x="%s" y="380" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
+		fmt.Fprintf(&b, `<text x="%s" y="380" text-anchor="end" class="cas-fuel-val" style="fill:%s">%s<tspan font-size="8" font-weight="600"> DAYS</tspan></text>`,
 			f(stripR), fuelColor, esc(daysLabel))
 
-		sy := 350.0
+		sy := 386.0
 		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx="2" class="cas-strip"/>`,
 			f(stripL), f(sy), f(stripW), f(stripH))
 		redW := stripW * (fuelRed / fuelFull)
@@ -210,8 +224,8 @@ func CASPanelSVG(s CASPanelState) string {
 		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="3" height="%s" rx="1.5" fill="%s"/>`,
 			f(needleX-1.5), f(sy+1.5), f(stripH-3), fuelColor)
 	} else {
-		fmt.Fprintf(&b, `<text x="%s" y="342" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
-		fmt.Fprintf(&b, `<text x="%s" y="342" text-anchor="end" font-size="11" font-weight="700" style="fill:%s;font-family:'B612 Mono',monospace;letter-spacing:0.14em">INOP</text>`,
+		fmt.Fprintf(&b, `<text x="%s" y="380" class="cas-fuel-label" style="fill:#8891a0">FUEL</text>`, f(stripL))
+		fmt.Fprintf(&b, `<text x="%s" y="380" text-anchor="end" font-size="11" font-weight="700" style="fill:%s;font-family:'B612 Mono',monospace;letter-spacing:0.14em">INOP</text>`,
 			f(stripR), gaugeRed)
 	}
 
