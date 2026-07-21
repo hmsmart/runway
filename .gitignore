@@ -43,3 +43,5 @@ __debug_*
 .task/
 
 static/font/*
+
+./runway.log
